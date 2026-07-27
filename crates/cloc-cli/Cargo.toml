@@ -2,6 +2,20 @@
 name = "cloc-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command line interface for cloc"
+
+[[bin]]
+name = "cloc-rs"
+path = "src/main.rs"
 
 [dependencies]
 cloc-core.workspace = true
+cloc-lang.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+rayon.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -73,9 +73,12 @@ fn strip_c_style(text: &str, line_comments: bool) -> String {
                 }
             }
             if line_comments && bytes[i + 1] == b'/' {
-                // A `//` comment ends at the newline, but a backslash at the
-                // end of the line continues it onto the next one.
-                i = end_of_continued_line(bytes, i + 2);
+                // A `//` comment ends at the newline. A C compiler would let
+                // a trailing backslash continue it onto the next line, but
+                // Regexp::Common does not, and cloc counts the continued
+                // line as code -- which matters for any language whose
+                // string literals use backslash continuation.
+                i = end_of_line(bytes, i + 2);
                 continue;
             }
         }
@@ -197,20 +200,6 @@ fn end_of_line(bytes: &[u8], from: usize) -> usize {
     }
 }
 
-/// Like [`end_of_line`], but a line ending in `\` continues onto the next.
-fn end_of_continued_line(bytes: &[u8], from: usize) -> usize {
-    let mut pos = from;
-    loop {
-        let eol = end_of_line(bytes, pos);
-        // Look back past the newline for a continuation marker.
-        if eol > 0 && eol < bytes.len() && bytes[eol - 1] == b'\\' {
-            pos = eol + 1;
-            continue;
-        }
-        return eol;
-    }
-}
-
 fn find_from(text: &str, needle: &str, from: usize) -> Option<usize> {
     if from > text.len() {
         return None;
@@ -249,13 +238,15 @@ mod tests {
         assert_eq!(strip_comments("a // /* \nb", CommentDialect::Cpp), "a \nb");
     }
 
-    /// A `//` comment continued with a trailing backslash swallows the next
-    /// line too — the reason the C++ dialect gets its own line handling.
+    /// A C compiler continues a `//` comment past a trailing backslash.
+    /// Regexp::Common does not, so cloc counts the next line as code and so
+    /// must we -- languages whose strings use backslash continuation (Rust,
+    /// C itself) would otherwise lose lines wholesale.
     #[test]
-    fn cpp_line_comment_honours_continuation() {
+    fn cpp_line_comment_stops_at_the_newline_despite_a_backslash() {
         assert_eq!(
-            strip_comments("a // b\\\nstill comment\nc", CommentDialect::Cpp),
-            "a \nc"
+            strip_comments("a // b\\\nstill code\nc", CommentDialect::Cpp),
+            "a \nstill code\nc"
         );
     }
 

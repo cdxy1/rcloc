@@ -718,24 +718,16 @@ fn remove_jsp_comments(lines: Vec<String>) -> Result<Vec<String>> {
 
 /// Join the lines, strip comments of `dialect`, and split again.
 ///
-/// The C++ dialect joins continued lines without a separator so that a `//`
-/// comment ending in a backslash swallows the next line, as the compiler
-/// would.
+/// Every line keeps its own separator. The original appears to special-case
+/// C++ here, but at that point its lines still carry their newlines: a
+/// continued line is appended as-is (one newline) while an ordinary line gets
+/// a second one, and the resulting blank lines are swept up by the blank pass
+/// that follows every filter. So no lines are ever merged, and joining
+/// uniformly is equivalent. Backslash continuation of a `//` comment is the
+/// scanner's business, not the joiner's.
 fn call_regexp_common(lines: Vec<String>, dialect: CommentDialect) -> Vec<String> {
-    let text = if dialect == CommentDialect::Cpp {
-        let mut joined = String::new();
-        for line in &lines {
-            joined.push_str(line);
-            if !line.ends_with('\\') {
-                joined.push('\n');
-            }
-        }
-        joined
-    } else {
-        let mut joined = lines.join("\n");
-        joined.push('\n');
-        joined
-    };
+    let mut text = lines.join("\n");
+    text.push('\n');
 
     dialects::strip_comments(&text, dialect)
         .split('\n')
