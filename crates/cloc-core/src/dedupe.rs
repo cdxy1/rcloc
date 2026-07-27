@@ -50,11 +50,19 @@ pub fn remove_duplicates(
         }
         // Sorting by full path rather than basename keeps the choice
         // reproducible when two directories hold the same file name.
-        group.sort();
+        //
+        // Compare the paths as raw strings, not as Path values: Rust orders
+        // paths component by component, so `python3` sorts before
+        // `python3-pip`, while Perl's string sort puts `python3-pip` first
+        // because `-` precedes `/`. Since the survivor of a duplicate set is
+        // chosen by position, that difference changes which name is reported.
+        group.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
         resolve_group(group, db, opts, &mut result);
     }
 
-    result.unique.sort();
+    result
+        .unique
+        .sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
     result
 }
 
@@ -194,6 +202,28 @@ mod tests {
         let r = run(&root, &["a.qqq", "b.py"]);
         assert_eq!(r.unique.len(), 1);
         assert!(r.unique[0].to_string_lossy().ends_with("b.py"));
+    }
+
+    /// Which duplicate survives depends on sort order, and Rust's Path
+    /// ordering is component-wise where Perl's is byte-wise: `python3` sorts
+    /// before `python3-pip` as paths, after it as strings. cloc reports the
+    /// string-sorted choice.
+    #[test]
+    fn duplicates_are_ordered_as_strings_not_paths() {
+        let root = tree(
+            "order",
+            &[
+                ("python3/x.css", "a{}\n"),
+                ("python3-pip/x.css", "a{}\n"),
+            ],
+        );
+        let r = run(&root, &["python3/x.css", "python3-pip/x.css"]);
+        assert_eq!(r.unique.len(), 1);
+        assert!(
+            r.unique[0].to_string_lossy().contains("python3/x.css"),
+            "kept {:?}",
+            r.unique[0]
+        );
     }
 
     #[test]
