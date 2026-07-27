@@ -1330,45 +1330,67 @@ fn find_docstring_delim(s: &str) -> Option<usize> {
 
 /// Neutralise C comment markers that appear *inside* docstrings, so the C
 /// scanner does not treat them as real comment boundaries.
+///
+/// The middle two branches are blunt: having found a docstring delimiter
+/// inside a `/* */` or after a `//`, they overwrite the three characters
+/// following that marker, assuming the delimiter sits right there. It usually
+/// does. Reproducing the assumption matters -- it is what turns `/*'''` into
+/// `/*xxx` in a Java file whose block comment happens to open with quotes.
 fn docstring_rm_comments(lines: Vec<String>) -> Result<Vec<String>> {
+    let single = regex_cache::cached(r#"("""|''')(.*?)"#)?;
+    let in_block = regex_cache::cached(r#"/\*.*?("""|''').*?\*/"#)?;
+    let after_line_comment = regex_cache::cached(r#"//.*?("""|''')"#)?;
+    let closing = regex_cache::cached(r#"^(.*?)("""|''')"#)?;
+    let opening = regex_cache::cached(r#"("""|''')(.*?)$"#)?;
+
     let mut in_docstring = false;
     let mut out = Vec::with_capacity(lines.len());
 
     for line in lines {
-        let delim = find_docstring_delim(&line);
-        let new_line = match delim {
-            Some(start) if closes_on_same_line(&line, start) => {
-                // Whole docstring on one line: scrub only its body.
-                let body_start = start + 3;
-                let body_end = line[body_start..]
-                    .find(&line[start..start + 3])
-                    .map(|o| body_start + o)
-                    .unwrap_or(line.len());
-                format!(
-                    "{}{}{}",
-                    &line[..body_start],
-                    scrub_c_markers(&line[body_start..body_end]),
-                    &line[body_end..]
-                )
-            }
-            Some(start) if !in_docstring => {
-                in_docstring = true;
-                format!(
-                    "{}{}",
-                    &line[..start + 3],
-                    scrub_c_markers(&line[start + 3..])
-                )
-            }
-            Some(start) => {
-                in_docstring = false;
-                format!("{}{}", scrub_c_markers(&line[..start]), &line[start..])
-            }
-            None if in_docstring => scrub_c_markers(&line),
-            None => line,
+        let new_line = if let Some(m) = single.find(&line)? {
+            // A docstring opening and closing on one line: scrub its body.
+            let (body_start, body_end) = (m.start() + 3, m.end() - 3);
+            format!(
+                "{}{}{}",
+                &line[..body_start],
+                scrub_c_markers(&line[body_start..body_end]),
+                &line[body_end..]
+            )
+        } else if let Some(m) = in_block.find(&line)? {
+            overwrite_three(&line, m.start() + 2)
+        } else if let Some(m) = after_line_comment.find(&line)? {
+            overwrite_three(&line, m.start() + 2)
+        } else if in_docstring && closing.is_match(&line)? {
+            in_docstring = false;
+            let caps = closing.captures(&line)?.expect("just matched");
+            let end = caps.get(1).map_or(0, |g| g.end());
+            format!("{}{}", scrub_c_markers(&line[..end]), &line[end..])
+        } else if !in_docstring && opening.is_match(&line)? {
+            in_docstring = true;
+            let m = opening.find(&line)?.expect("just matched");
+            let start = m.start() + 3;
+            format!("{}{}", &line[..start], scrub_c_markers(&line[start..]))
+        } else if in_docstring {
+            scrub_c_markers(&line)
+        } else {
+            line
         };
         out.push(new_line);
     }
     Ok(out)
+}
+
+/// Replace the three characters at `at` with `xxx`, leaving the rest alone.
+fn overwrite_three(line: &str, at: usize) -> String {
+    if at >= line.len() {
+        return line.to_string();
+    }
+    // Step by characters so a multi-byte sequence is not split in half.
+    let end = line[at..]
+        .char_indices()
+        .nth(3)
+        .map_or(line.len(), |(offset, _)| at + offset);
+    format!("{}xxx{}", &line[..at], &line[end..])
 }
 
 fn closes_on_same_line(line: &str, start: usize) -> bool {

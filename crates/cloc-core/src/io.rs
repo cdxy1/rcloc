@@ -42,15 +42,22 @@ pub fn read_lines(path: &Path) -> Result<Vec<String>> {
 
 /// Split raw file bytes into lines, applying cloc's normalisations.
 ///
-/// Invalid UTF-8 is replaced rather than rejected: cloc counts such files, and
-/// refusing them would lose lines it counts.
+/// A file that is not valid UTF-8 is decoded byte for byte instead, each byte
+/// becoming the code point of the same value. cloc works on bytes throughout,
+/// and this keeps byte identity so a pattern like `\xa0` still matches what
+/// it matches there. Substituting a replacement character would not: an
+/// Arduino sketch padded with raw 0xA0 has a filter to turn those into
+/// spaces, and lines that should collapse to blank would survive as code.
 pub fn lines_from_bytes(bytes: &[u8]) -> Vec<String> {
     let body = BOMS
         .iter()
         .find(|bom| bytes.starts_with(bom))
         .map_or(bytes, |bom| &bytes[bom.len()..]);
 
-    let text = String::from_utf8_lossy(body);
+    let text: std::borrow::Cow<'_, str> = match std::str::from_utf8(body) {
+        Ok(valid) => std::borrow::Cow::Borrowed(valid),
+        Err(_) => std::borrow::Cow::Owned(body.iter().map(|&b| b as char).collect()),
+    };
     if text.is_empty() {
         // A file holding nothing but a byte-order mark still has a line in
         // it. The original forces a trailing newline onto the raw content
@@ -187,6 +194,21 @@ mod tests {
     #[test]
     fn invalid_utf8_does_not_lose_lines() {
         assert_eq!(lines_from_bytes(b"a\n\xff\xfe_bad\nc").len(), 3);
+    }
+
+    /// Bytes that are not valid UTF-8 keep their identity, so a pattern
+    /// written against the byte value still matches.
+    #[test]
+    fn invalid_utf8_decodes_byte_for_byte() {
+        let lines = lines_from_bytes(b"\xa0\xa0// note\n");
+        assert_eq!(lines, vec!["\u{a0}\u{a0}// note"]);
+    }
+
+    /// Valid UTF-8 is still decoded properly, so non-Latin source is not
+    /// mangled into individual bytes.
+    #[test]
+    fn valid_utf8_is_decoded_as_utf8() {
+        assert_eq!(lines_from_bytes("⍝ комментарий".as_bytes()), vec!["⍝ комментарий"]);
     }
 
     /// A file consisting only of a byte-order mark is one blank line, not
