@@ -1,0 +1,17 @@
+rcloc
+Copyright (C) 2025-2026 Artem Minkin and rcloc contributors
+
+rcloc is an independent Rust port of cloc by Al Danial:
+https://github.com/AlDanial/cloc
+
+The language definitions in data/languages.json were mechanically derived
+from cloc 2.11. cloc is Copyright (C) 2006-2026 Al Danial and is distributed
+under the GNU General Public License version 2. Portions of upstream cloc that
+come from other sources may have additional terms; rcloc does not embed the
+upstream Perl modules identified by cloc as Artistic-licensed components.
+
+rcloc as a whole is distributed under the GNU General Public License version
+2 or, at your option, any later version. See LICENSE for the complete terms.
+
+This project is not affiliated with or endorsed by Al Danial. “cloc” is used
+only to identify the upstream project and command-line compatibility target.

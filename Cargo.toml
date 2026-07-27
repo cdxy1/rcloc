@@ -7,8 +7,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-or-later"
-description = "Count Lines of Code — a Rust port of Al Danial's cloc"
-repository = "https://github.com/AlDanial/cloc"
+description = "A fast, modern source line counter compatible with cloc"
+repository = "https://github.com/cdxy1/rcloc"
+homepage = "https://github.com/cdxy1/rcloc"
 
 [workspace.dependencies]
 cloc-lang = { path = "crates/cloc-lang" }

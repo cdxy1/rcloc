@@ -1,94 +1,166 @@
-# cloc-rs
+<div align="center">
 
-A Rust port of [cloc](https://github.com/AlDanial/cloc), Al Danial's line
-counter. It recognises 422 languages across 1012 file extensions and produces
-the same counts as the original.
+# ⚡ rcloc
 
-```sh
+### Your codebase, counted at Rust speed.
+
+**A fast, modern source-code counter with familiar `cloc` accuracy and a cleaner CLI.**
+
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License: GPL v2+](https://img.shields.io/badge/license-GPL--2.0%2B-7c3aed.svg)](LICENSE)
+[![Languages](https://img.shields.io/badge/languages-422-06b6d4.svg)](data/languages.json)
+[![No runtime](https://img.shields.io/badge/runtime_dependencies-none-22c55e.svg)](#install)
+
+```console
+$ rcloc .
+◉ rcloc 0.1.0
+  189 files · 21,121 lines · 0.15s · 1,229 files/s
+
+┌──────────────────────┬─────────┬──────────────┬──────────────┬──────────────┐
+│ Language             │   files │        blank │      comment │         code │
+├──────────────────────┼─────────┼──────────────┼──────────────┼──────────────┤
+│ JSON                 │      85 │            0 │            0 │        9,943 │
+│ Rust                 │      28 │          863 │        1,470 │        8,135 │
+│ D                    │      70 │          195 │            0 │        1,000 │
+├──────────────────────┼─────────┼──────────────┼──────────────┼──────────────┤
+│ SUM:                 │     189 │        1,093 │        1,518 │       19,510 │
+└──────────────────────┴─────────┴──────────────┴──────────────┴──────────────┘
+```
+
+[Install](#install) · [Usage](#usage) · [Output formats](#output-formats) · [Why rcloc?](#why-rcloc) · [License](#license-and-origin)
+
+</div>
+
+## Why rcloc?
+
+`rcloc` answers a simple question—*what is this codebase made of?*—without making you wait or decipher a wall of text.
+
+- **Fast by default.** Native Rust, parallel counting, no interpreter and no runtime dependencies.
+- **Broad language support.** 422 languages across 1,012 extensions, including content-based detection for ambiguous extensions.
+- **Battle-tested counts.** Developed for count parity with the original [`cloc`](https://github.com/AlDanial/cloc) 2.11.
+- **Made for humans and scripts.** A polished terminal table plus JSON, YAML, CSV, Markdown, XML and SQL.
+- **More than a counter.** Compare directories or Git revisions, inspect individual files, scan archives and customize language definitions.
+- **Works with real repositories.** Respects VCS file lists, filters generated/binary files and removes duplicate content.
+
+In one local benchmark over `/usr/share/perl5`, `rcloc` completed in **0.025 s** versus **0.786 s** for the Perl implementation. Results depend on hardware, filesystem cache and corpus, so treat this as a data point—not a universal promise.
+
+## Install
+
+### Build from source
+
+You need [Rust 1.75 or newer](https://www.rust-lang.org/tools/install).
+
+```bash
+git clone https://github.com/cdxy1/rcloc.git
+cd rcloc
 cargo build --release
 ./target/release/cloc-rs .
 ```
 
-## Layout
+To put the binary in Cargo's bin directory:
 
-| Path | What it is |
-| --- | --- |
-| `data/languages.json` | 1012 extensions, 422 languages, 22 ambiguous extensions. |
-| `crates/cloc-lang` | Language definitions: what language a file is, how its comments are written. |
-| `crates/cloc-core` | The counting engine: filters, comment scanners, diffing, file selection. |
-| `crates/cloc-cli` | Command line interface and output formats. |
+```bash
+cargo install --path crates/cloc-cli
+cloc-rs .
+```
 
-## Parity with the original
+> The package currently installs as `cloc-rs`. The shorter `rcloc` name used in examples describes the project; you can create an alias if you prefer it: `alias rcloc=cloc-rs`.
 
-Developed against cloc 2.11, which lived in this repository as `cloc` until it
-was removed. At the `parity-verified` tag the two agreed exactly on:
+## Usage
 
-| Corpus | Files |
-| --- | ---: |
-| cloc's own test corpus (`tests/inputs`) | 345 |
-| This repository | 912 |
-| `/usr/share/vim` | 1896 |
-| Python 3.12 standard library | 578 |
-| `/usr/share/perl5` | 479 |
+Count the current project:
 
-To re-check against the original, check out that tag: it still has the Perl
-script, its 352-file test corpus, and the two comparison harnesses —
-`tools/parity.py`, which compares per-file counts and groups mismatches by
-language, and `tools/run_suite.py`, which runs the corpus.
+```bash
+cloc-rs .
+```
 
-```sh
+See every file, not just language totals:
+
+```bash
+cloc-rs --by-file src
+```
+
+Count only selected languages and format large numbers:
+
+```bash
+cloc-rs --include-lang=Rust,TypeScript --thousands-delimiter=, .
+```
+
+Compare two source trees:
+
+```bash
+cloc-rs --diff release-1.0 release-2.0
+```
+
+Compare Git revisions:
+
+```bash
+cloc-rs --git-diff-all v1.0.0 v2.0.0
+```
+
+Use Git's tracked-file list so build artifacts and ignored files stay out:
+
+```bash
+cloc-rs --vcs=git .
+```
+
+Run `cloc-rs --help` for the complete option reference.
+
+## Output formats
+
+The default report is designed for a terminal. Structured formats keep their stable, decoration-free schemas for pipelines.
+
+| Format | Flag | Great for |
+|:--|:--|:--|
+| Text | default | terminals and quick checks |
+| JSON | `--json` | APIs, `jq`, CI dashboards |
+| YAML | `--yaml` | configuration-oriented workflows |
+| CSV | `--csv` | spreadsheets and data tools |
+| Markdown | `--md` | pull requests and documentation |
+| XML | `--xml` | legacy integrations and XSL |
+| SQL | `--sql=FILE` | storing historical measurements |
+
+Write any report directly to a file with `--report-file FILE`. Use `--quiet` to remove the text/structured header.
+
+## Accuracy and compatibility
+
+At the `parity-verified` tag, `rcloc` matched `cloc` 2.11 exactly across cloc's 345-file test corpus, this repository, `/usr/share/vim`, the Python 3.12 standard library and `/usr/share/perl5`.
+
+```bash
 git checkout parity-verified
 ```
 
-`data/languages.json` was extracted mechanically from the Perl source by
-`tools/extract_lang_defs.pl`, also at that tag. It is now the canonical copy;
-`cloc-lang` resolves every filter specification into a typed enum when it
-loads, so a malformed entry fails the tests rather than surfacing as a wrong
-count later.
+That tag contains the upstream reference script and the comparison harnesses used for verification. The current language database lives in [`data/languages.json`](data/languages.json); malformed filter definitions fail tests at load time instead of silently producing incorrect counts.
 
-On `/usr/share/perl5` this build runs in 0.025 s against the original's
-0.786 s.
+Some surprising upstream counting behavior is intentionally preserved for compatibility—for example, comment scanners do not parse string literals unless the matching compatibility option is enabled. One deliberate improvement is support for non-ASCII filenames in `--git-diff-all`.
 
-## Testing
+## Development
 
-```sh
-cargo test
+The workspace is intentionally split into small, reusable layers:
+
+| Path | Responsibility |
+|:--|:--|
+| `crates/cloc-lang` | language definitions and comment-filter parsing |
+| `crates/cloc-core` | walking, classification, counting, deduplication and diffs |
+| `crates/cloc-cli` | command-line interface and report renderers |
+| `data/languages.json` | canonical language and extension database |
+
+Run the complete suite with:
+
+```bash
+cargo test --workspace
 ```
 
-The engine is covered by unit tests next to the code; `crates/cloc-cli/tests/cli.rs`
-runs the binary end to end. Every count asserted was taken from the original
-while it was still present.
+## License and origin
 
-## Notes on fidelity
+`rcloc` is an **independent Rust port** of [Al Danial's cloc](https://github.com/AlDanial/cloc). It is not affiliated with or endorsed by the upstream author.
 
-Several behaviours of the original look like bugs and are reproduced anyway,
-because matching cloc's numbers is the point. Each of these was found by a
-count disagreeing, not by reading the source:
+The project is licensed under **GNU GPL 2.0 or later**, matching the upstream licensing requirements. The full terms are in [`LICENSE`](LICENSE), and attribution plus provenance details are recorded in [`NOTICE`](NOTICE). If you distribute a binary, GPL obligations include making the corresponding source available under the same license.
 
-- `rm_comments_in_strings` is skipped unless `--strip-str-comments`, and
-  `remove_inline` unless `--inline`. Together that is over a third of all
-  filter steps in the table.
-- Comment scanners do not understand string literals, so `"/* x */"` inside a
-  string is stripped. An unterminated `/*` removes nothing at all, because the
-  generated regexes need a closing delimiter.
-- A `//` comment ends at the newline even if the line ends in a backslash, and
-  it consumes that newline — invisible in ordinary C++ because the caller
-  supplies two, but not in a language whose filter chain strips them first.
-- Perl's `$1` survives a *failed* match, is cleared by a *successful* one with
-  no capture groups, and is restored to undefined when `next` unwinds the loop
-  body. The `remove_between_*` family reads `$1` across lines and depends on
-  all three.
-- Filters see each line with its newline attached, so `\s`, `.` and `[^x]` can
-  match it. A lone `#` is an Imba comment only for that reason.
-- Files that are not valid UTF-8 are decoded byte for byte rather than
-  lossily, since cloc works on bytes and its patterns are written against them.
-- Files whose content duplicates another are dropped, and among duplicates the
-  survivor is chosen by *string* sort order, not path order.
+---
 
-One difference the other way: `--git-diff-all` fails in the original on a
-repository containing a non-ASCII filename, whose quoted path it does not
-parse. This port reads them.
+<div align="center">
 
-## Licence
+**Less waiting. Better signal. Know your codebase.**
 
-GPL-2.0-or-later, following the original.
+</div>
