@@ -1393,11 +1393,6 @@ fn overwrite_three(line: &str, at: usize) -> String {
     format!("{}xxx{}", &line[..at], &line[end..])
 }
 
-fn closes_on_same_line(line: &str, start: usize) -> bool {
-    let delim = &line[start..start + 3];
-    line[start + 3..].contains(delim)
-}
-
 fn scrub_c_markers(s: &str) -> String {
     s.replace("/*", "xx").replace("*/", "xx").replace("//", "xx")
 }

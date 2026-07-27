@@ -49,7 +49,7 @@ pub fn sdiff(left: &[String], right: &[String]) -> Vec<Row> {
     let mut rows = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
 
-    let mut flush = |rows: &mut Vec<Row>,
+    let flush = |rows: &mut Vec<Row>,
                      li: &mut usize,
                      lj: &mut usize,
                      i_end: usize,

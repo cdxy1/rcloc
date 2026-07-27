@@ -6,7 +6,6 @@
 use crate::report::Report;
 use cloc_lang::LangDb;
 use std::fmt::Write as _;
-use std::path::Path;
 
 /// Which dialect to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,13 +202,6 @@ pub fn default_project() -> String {
         .unwrap_or_default()
 }
 
-/// `dirname` for display, matching the original's use of File::Basename.
-pub fn dirname_of(path: &Path) -> String {
-    path.parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ".".to_string())
-}
 
 #[cfg(test)]
 mod tests {

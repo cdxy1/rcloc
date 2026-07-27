@@ -8,6 +8,11 @@
 //! Around twenty extensions are claimed by more than one language (`.m`,
 //! `.pl`, `.ts`, ...). Those map to a pseudo-language such as `Perl/Prolog`,
 //! which a resolver turns into a real one by scoring the file's contents.
+//!
+//! The resolvers keep one branch per rule of the original even where two
+//! adjacent rules award the same points, so each can be checked against its
+//! counterpart. Collapsing them would read better and verify worse.
+#![allow(clippy::if_same_then_else)]
 
 use crate::regex_cache;
 use anyhow::Result;
