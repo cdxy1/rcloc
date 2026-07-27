@@ -16,7 +16,7 @@ use serde::Deserialize;
 use std::fmt;
 
 /// A filter exactly as it appears in `languages.json`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RawFilter {
     pub filter: String,
     #[serde(default)]
@@ -197,6 +197,98 @@ impl fmt::Display for FilterParseError {
 impl std::error::Error for FilterParseError {}
 
 impl Filter {
+    /// The inverse of [`Filter::from_raw`], for writing definitions back out.
+    ///
+    /// Optional trailing arguments are emitted only when they differ from
+    /// their default, so a round trip through the text format is stable.
+    pub fn to_raw(&self) -> RawFilter {
+        let f = |name: &str, args: Vec<String>| RawFilter {
+            filter: name.to_string(),
+            args,
+        };
+        let s = |v: &String| v.clone();
+        match self {
+            Self::RemoveMatches { re } => f("remove_matches", vec![s(re)]),
+            Self::RemoveInline { re } => f("remove_inline", vec![s(re)]),
+            Self::RmCommentsInStrings {
+                string_marker,
+                start_comment,
+                end_comment,
+                multiline,
+            } => {
+                let mut args = vec![s(string_marker), s(start_comment), s(end_comment)];
+                if *multiline {
+                    args.push("1".to_string());
+                }
+                f("rm_comments_in_strings", args)
+            }
+            Self::RemoveBetweenGeneral { start, end } => {
+                f("remove_between_general", vec![s(start), s(end)])
+            }
+            Self::RemoveBetweenRegex { start, end } => {
+                f("remove_between_regex", vec![s(start), s(end)])
+            }
+            Self::ReplaceBetweenRegex {
+                start,
+                end,
+                replacement,
+                multiline,
+            } => {
+                let mut args = vec![s(start), s(end), s(replacement)];
+                // The default here is 1, so only a 0 needs saying.
+                if !*multiline {
+                    args.push("0".to_string());
+                }
+                f("replace_between_regex", args)
+            }
+            Self::ReplaceRegex { re, replacement } => {
+                f("replace_regex", vec![s(re), s(replacement)])
+            }
+            Self::RemoveAbove { re } => f("remove_above", vec![s(re)]),
+            Self::RemoveBelow { re } => f("remove_below", vec![s(re)]),
+            Self::RemoveBelowAbove { below, above } => {
+                f("remove_below_above", vec![s(below), s(above)])
+            }
+            Self::RemoveHtmlComments => f("remove_html_comments", vec![]),
+            Self::CallRegexpCommon { dialect } => {
+                f("call_regexp_common", vec![dialect.as_str().to_string()])
+            }
+            Self::RemoveF77Comments => f("remove_f77_comments", vec![]),
+            Self::RemoveF90Comments => f("remove_f90_comments", vec![]),
+            Self::RemoveCobolComments => f("remove_cobol_comments", vec![]),
+            Self::RemoveJclComments => f("remove_jcl_comments", vec![]),
+            Self::RemoveJspComments => f("remove_jsp_comments", vec![]),
+            Self::RemoveOCamlComments => f("remove_OCaml_comments", vec![]),
+            Self::RemoveHaskellComments { arg } => {
+                f("remove_haskell_comments", vec![s(arg)])
+            }
+            Self::RemoveTlaPlusComments => f("remove_TLAPlus_comments", vec![]),
+            Self::RemoveTlaPlusGeneratedCode => f("remove_TLAPlus_generated_code", vec![]),
+            Self::RemoveBfComments => f("remove_bf_comments", vec![]),
+            Self::RemoveHamlBlock => f("remove_haml_block", vec![]),
+            Self::RemovePugBlock => f("remove_pug_block", vec![]),
+            Self::RemoveSlimBlock => f("remove_slim_block", vec![]),
+            Self::ReduceToRmdCodeBlocks => f("reduce_to_rmd_code_blocks", vec![]),
+            Self::DocstringToC => f("docstring_to_C", vec![]),
+            Self::DocstringRmComments => f("docstring_rm_comments", vec![]),
+            Self::ElixirDocToC => f("elixir_doc_to_C", vec![]),
+            Self::ForthParenToC => f("Forth_paren_to_C", vec![]),
+            Self::PowershellToC => f("powershell_to_C", vec![]),
+            Self::SmartyToC => f("smarty_to_C", vec![]),
+            Self::JupyterNb => f("jupyter_nb", vec![]),
+            Self::CallParseCivet => f("call_parse_civet", vec![]),
+            Self::AddNewlines => f("add_newlines", vec![]),
+            Self::PrePostFix { prefix, postfix } => {
+                f("pre_post_fix", vec![s(prefix), s(postfix)])
+            }
+            Self::RmLastLine => f("rm_last_line", vec![]),
+            Self::Die { message } => {
+                let args = if message.is_empty() { vec![] } else { vec![s(message)] };
+                f("die", args)
+            }
+        }
+    }
+
     /// Resolve a raw filter spec for `language`.
     pub fn from_raw(language: &str, raw: &RawFilter) -> Result<Self, FilterParseError> {
         let err = |detail: String| FilterParseError {

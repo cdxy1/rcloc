@@ -54,6 +54,12 @@ impl Classification {
 
 /// Decide the language of `path`, reading its contents only if needed.
 pub fn classify(path: &Path, db: &LangDb, opts: &ClassifyOptions) -> Result<Classification> {
+    // A bare `--force-lang=LANG` claims every file, name and content
+    // notwithstanding.
+    if let Some(forced) = db.forced_language() {
+        return Ok(Classification::Language(forced.to_string()));
+    }
+
     let raw_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

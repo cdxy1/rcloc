@@ -11,8 +11,10 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub mod filter;
+pub mod langdef;
 
 pub use filter::{CommentDialect, Filter, RawFilter};
+pub use langdef::{LangDef, LangDefs};
 
 /// The extracted tables, as they appear on disk.
 #[derive(Debug, Deserialize)]
@@ -62,6 +64,8 @@ pub struct LangDb {
     /// The distinct values of `language_by_script`, i.e. every language a
     /// `#!` line can name.
     script_languages: BTreeSet<String>,
+    /// `--force-lang=LANG` with no extension: count everything as this.
+    force_all_language: Option<String>,
 }
 
 /// The JSON is embedded so the binary is self-contained: cloc is often copied
@@ -76,6 +80,21 @@ impl LangDb {
     /// The definitions compiled into this binary.
     pub fn default_db() -> &'static LangDb {
         &DEFAULT
+    }
+
+    /// The embedded JSON, for callers that need their own mutable copy.
+    pub fn embedded_json() -> &'static str {
+        EMBEDDED
+    }
+
+    /// Count every file as `language`, per a bare `--force-lang=LANG`.
+    pub fn force_all(&mut self, language: &str) {
+        self.force_all_language = Some(language.to_string());
+    }
+
+    /// The language every file is being forced to, if any.
+    pub fn forced_language(&self) -> Option<&str> {
+        self.force_all_language.as_deref()
     }
 
     /// Parse definitions from JSON in the extractor's schema.
@@ -120,7 +139,162 @@ impl LangDb {
             extension_collision: raw.extension_collision,
             collision_by_extension,
             script_languages,
+            force_all_language: None,
         })
+    }
+
+    /// Fold user-supplied definitions in, as `--read-lang-def` does.
+    ///
+    /// A language the built-ins already know keeps its filters and scale
+    /// factor; only its extensions, file names and interpreters are added to.
+    /// A language they do not know is taken whole. That asymmetry is the
+    /// original's: the common use is teaching cloc a new extension for a
+    /// language it can already count.
+    pub fn merge_definitions(&mut self, defs: &LangDefs) -> Result<()> {
+        for (language, def) in defs {
+            let known = self.scale_factor.contains_key(language);
+            if !known {
+                let filters = def
+                    .filters
+                    .iter()
+                    .map(|r| Filter::from_raw(language, r))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.filters_by_language.insert(language.clone(), filters);
+                if let Some(scale) = def.scale_factor {
+                    self.scale_factor.insert(language.clone(), scale);
+                }
+                if let Some(eol) = &def.eol_continuation {
+                    self.eol_continuation_re
+                        .insert(language.clone(), eol.clone());
+                }
+            }
+            self.add_names(language, def);
+        }
+        Ok(())
+    }
+
+    /// Discard the built-ins and use only these definitions, as
+    /// `--force-lang-def` does.
+    pub fn replace_definitions(&mut self, defs: &LangDefs) -> Result<()> {
+        self.language_by_extension.clear();
+        self.language_by_script.clear();
+        self.language_by_file_type.clear();
+        self.filters_by_language.clear();
+        self.scale_factor.clear();
+        self.eol_continuation_re.clear();
+        self.script_languages.clear();
+        self.extension_collision.clear();
+        self.collision_by_extension.clear();
+
+        for (language, def) in defs {
+            let filters = def
+                .filters
+                .iter()
+                .map(|r| Filter::from_raw(language, r))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.filters_by_language.insert(language.clone(), filters);
+            if let Some(scale) = def.scale_factor {
+                self.scale_factor.insert(language.clone(), scale);
+            }
+            if let Some(eol) = &def.eol_continuation {
+                self.eol_continuation_re
+                    .insert(language.clone(), eol.clone());
+            }
+            self.add_names(language, def);
+        }
+        Ok(())
+    }
+
+    fn add_names(&mut self, language: &str, def: &LangDef) {
+        for ext in &def.extensions {
+            self.language_by_extension
+                .insert(ext.clone(), language.to_string());
+            // A user-declared extension is code by definition.
+            self.not_code_extension.remove(ext);
+        }
+        for name in &def.filenames {
+            self.language_by_file_type
+                .insert(name.clone(), language.to_string());
+        }
+        for exe in &def.script_exes {
+            self.language_by_script
+                .insert(exe.clone(), language.to_string());
+            self.script_languages.insert(language.to_string());
+        }
+    }
+
+    /// Force `extension` to be counted as `language`, per `--force-lang`.
+    pub fn force_extension(&mut self, extension: &str, language: &str) {
+        self.language_by_extension
+            .insert(extension.to_string(), language.to_string());
+        self.not_code_extension.remove(extension);
+        self.collision_by_extension.remove(extension);
+    }
+
+    /// Map a `#!` interpreter to a language, per `--script-lang`.
+    pub fn force_script(&mut self, interpreter: &str, language: &str) {
+        self.language_by_script
+            .insert(interpreter.to_string(), language.to_string());
+        self.script_languages.insert(language.to_string());
+    }
+
+    /// Look up a language name case-insensitively, as the options do.
+    pub fn canonical_language(&self, name: &str) -> Option<&str> {
+        let wanted = name.to_lowercase();
+        self.filters_by_language
+            .keys()
+            .find(|k| k.to_lowercase() == wanted)
+            .map(String::as_str)
+    }
+
+    /// Render the current definitions in the text format.
+    ///
+    /// Languages whose extension is shared with another are skipped unless
+    /// `include_duplicates`, since writing the shared extension under both
+    /// names produces a file that cannot be read back.
+    pub fn to_definitions(&self, include_duplicates: bool) -> LangDefs {
+        let mut defs = LangDefs::new();
+        for (language, filters) in &self.filters_by_language {
+            if language.contains("Brain") || language == "(unknown)" {
+                continue;
+            }
+            if self.extension_collision.contains_key(language) {
+                continue;
+            }
+            let mut def = LangDef {
+                filters: filters.iter().map(Filter::to_raw).collect(),
+                scale_factor: self.scale_factor.get(language).copied(),
+                eol_continuation: self.eol_continuation_re.get(language).cloned(),
+                ..Default::default()
+            };
+            for (ext, owner) in &self.language_by_extension {
+                if owner == language {
+                    def.extensions.push(ext.clone());
+                }
+            }
+            if def.extensions.is_empty() && include_duplicates {
+                for (pseudo, exts) in &self.extension_collision {
+                    if pseudo.split('/').any(|part| part == language) {
+                        def.extensions.extend(exts.iter().cloned());
+                    }
+                }
+            }
+            for (name, owner) in &self.language_by_file_type {
+                if owner == language {
+                    def.filenames.push(name.clone());
+                }
+            }
+            for (exe, owner) in &self.language_by_script {
+                if owner == language {
+                    def.script_exes.push(exe.clone());
+                }
+            }
+            def.extensions.sort();
+            def.filenames.sort();
+            def.script_exes.sort();
+            defs.insert(language.clone(), def);
+        }
+        defs
     }
 
     pub fn language_for_extension(&self, ext: &str) -> Option<&str> {
@@ -288,6 +462,70 @@ mod tests {
         assert!(!db.is_not_code_extension("csv"));
         // Something that only appears in the not-code table is unaffected.
         assert!(db.is_not_code_extension("jpg"));
+    }
+
+    /// `--read-lang-def` teaches an extension to a language cloc already
+    /// knows, without disturbing that language's filters.
+    #[test]
+    fn merging_adds_names_but_keeps_known_filters() {
+        let mut db = LangDb::from_json(LangDb::embedded_json()).unwrap();
+        let before = db.filters("Python").unwrap().len();
+        let defs = langdef::parse("Python\n    extension pyx2\n    filter remove_matches ^X\n")
+            .unwrap();
+        db.merge_definitions(&defs).unwrap();
+        assert_eq!(db.language_for_extension("pyx2"), Some("Python"));
+        assert_eq!(db.filters("Python").unwrap().len(), before);
+    }
+
+    /// A language the built-ins do not know is taken whole.
+    #[test]
+    fn merging_adds_unknown_languages_entirely() {
+        let mut db = LangDb::from_json(LangDb::embedded_json()).unwrap();
+        let defs = langdef::parse(
+            "Widget\n    filter remove_matches ^;\n    extension wdg\n    3rd_gen_scale 1.00\n",
+        )
+        .unwrap();
+        db.merge_definitions(&defs).unwrap();
+        assert_eq!(db.language_for_extension("wdg"), Some("Widget"));
+        assert_eq!(db.filters("Widget").unwrap().len(), 1);
+        assert_eq!(db.scale_factor("Widget"), Some(1.0));
+    }
+
+    /// `--force-lang-def` discards the built-ins rather than adding to them.
+    #[test]
+    fn replacing_discards_the_built_ins() {
+        let mut db = LangDb::from_json(LangDb::embedded_json()).unwrap();
+        let defs =
+            langdef::parse("Widget\n    extension wdg\n    3rd_gen_scale 1.00\n").unwrap();
+        db.replace_definitions(&defs).unwrap();
+        assert_eq!(db.language_for_extension("wdg"), Some("Widget"));
+        assert_eq!(db.language_for_extension("rs"), None);
+        assert_eq!(db.languages(), vec!["Widget"]);
+    }
+
+    /// What --write-lang-def emits must be readable by --force-lang-def, so
+    /// the two options compose.
+    #[test]
+    fn written_definitions_can_be_read_back() {
+        let db = LangDb::default_db();
+        let text = langdef::write(&db.to_definitions(false));
+        let parsed = langdef::parse(&text).expect("round trip parses");
+
+        let mut rebuilt = LangDb::from_json(LangDb::embedded_json()).unwrap();
+        rebuilt.replace_definitions(&parsed).unwrap();
+        assert_eq!(rebuilt.language_for_extension("rs"), Some("Rust"));
+        assert_eq!(rebuilt.language_for_extension("py"), Some("Python"));
+        assert_eq!(rebuilt.language_for_file_name("Makefile"), Some("make"));
+        assert_eq!(rebuilt.language_for_script("python3"), Some("Python"));
+    }
+
+    /// Language names are matched case-insensitively by the options.
+    #[test]
+    fn language_lookup_ignores_case() {
+        let db = LangDb::default_db();
+        assert_eq!(db.canonical_language("python"), Some("Python"));
+        assert_eq!(db.canonical_language("BOURNE SHELL"), Some("Bourne Shell"));
+        assert_eq!(db.canonical_language("nosuch"), None);
     }
 
     /// An ambiguous extension resolves to its pseudo-language, which the

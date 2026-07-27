@@ -159,6 +159,31 @@ struct Cli {
     processes: usize,
 
     // --- information ---
+    /// Add language definitions from this file to the built-in ones.
+    #[arg(long = "read-lang-def", alias = "read_lang_def", value_name = "FILE")]
+    read_lang_def: Option<PathBuf>,
+    /// Use only the language definitions in this file.
+    #[arg(long = "force-lang-def", alias = "force_lang_def", value_name = "FILE")]
+    force_lang_def: Option<PathBuf>,
+    /// Write the built-in language definitions to this file.
+    #[arg(long = "write-lang-def", alias = "write_lang_def", value_name = "FILE")]
+    write_lang_def: Option<PathBuf>,
+    /// As --write-lang-def, but also emit extensions shared between languages.
+    #[arg(
+        long = "write-lang-def-incl-dup",
+        alias = "write_lang_def_incl_dup",
+        value_name = "FILE"
+    )]
+    write_lang_def_incl_dup: Option<PathBuf>,
+    /// Count LANG[,EXT]: with an extension, claim it; without, count
+    /// everything as LANG. Repeatable.
+    #[arg(long = "force-lang", alias = "force_lang", value_name = "LANG[,EXT]")]
+    force_lang: Vec<String>,
+    /// Treat files whose `#!` names INTERP as LANG, given as LANG,INTERP
+    /// (e.g. Perl,perl5.8.8). Repeatable.
+    #[arg(long = "script-lang", alias = "script_lang", value_name = "LANG,INTERP")]
+    script_lang: Vec<String>,
+
     /// List the recognised languages and their extensions.
     #[arg(long = "show-lang", alias = "show_lang")]
     show_lang: bool,
@@ -182,8 +207,15 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let db = LangDb::default_db();
+    let db = build_language_db(&cli)?;
+    let db = &db;
 
+    if let Some(path) = &cli.write_lang_def {
+        return write_definitions(db, path, false);
+    }
+    if let Some(path) = &cli.write_lang_def_incl_dup {
+        return write_definitions(db, path, true);
+    }
     if cli.show_lang {
         print_languages(db);
         return Ok(());
@@ -231,6 +263,59 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// Build the language definitions this run will use, applying whichever of
+/// the definition options were given.
+fn build_language_db(cli: &Cli) -> Result<LangDb> {
+    let mut db = LangDb::from_json(LangDb::embedded_json())?;
+
+    // --force-lang-def replaces the built-ins outright; --read-lang-def adds
+    // to them. Giving both is the user asking for two different things.
+    if let Some(path) = &cli.force_lang_def {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        db.replace_definitions(&cloc_lang::langdef::parse(&text)?)?;
+    }
+    if let Some(path) = &cli.read_lang_def {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        db.merge_definitions(&cloc_lang::langdef::parse(&text)?)?;
+    }
+
+    for pair in &cli.force_lang {
+        let (name, extension) = match pair.split_once(',') {
+            Some((n, e)) => (n, Some(e)),
+            None => (pair.as_str(), None),
+        };
+        let Some(language) = db.canonical_language(name).map(str::to_string) else {
+            bail!("--force-lang: unknown language {name:?}; try --show-lang");
+        };
+        match extension {
+            Some(ext) => db.force_extension(ext, &language),
+            // Without an extension this claims every file in the run.
+            None => db.force_all(&language),
+        }
+    }
+
+    for pair in &cli.script_lang {
+        // The language comes first, then the interpreter -- the opposite
+        // order to --force-lang=LANG,EXT, but it is what cloc accepts.
+        let Some((name, interpreter)) = pair.split_once(',') else {
+            bail!("--script-lang expects LANG,INTERP, got {pair:?}");
+        };
+        let Some(language) = db.canonical_language(name).map(str::to_string) else {
+            bail!("--script-lang: unknown language {name:?}; try --show-lang");
+        };
+        db.force_script(interpreter, &language);
+    }
+
+    Ok(db)
+}
+
+fn write_definitions(db: &LangDb, path: &std::path::Path, include_dup: bool) -> Result<()> {
+    let text = cloc_lang::langdef::write(&db.to_definitions(include_dup));
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
 fn format_of(cli: &Cli) -> Format {
     if cli.json {
         Format::Json
@@ -247,7 +332,7 @@ fn format_of(cli: &Cli) -> Format {
     }
 }
 
-fn count(cli: &Cli, db: &'static LangDb) -> Result<Report> {
+fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
     // --skip-archive drops matching inputs before anything is unpacked.
     let mut inputs = cli.inputs.clone();
     if let Some(pattern) = &cli.skip_archive {
