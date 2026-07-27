@@ -63,11 +63,23 @@ pub fn apply_chain(
     }
     let original_first = lines[0].clone();
 
+    // Whether the lines would still carry their terminators in the original.
+    // Filters that return `split("\n", ...)` drop them, `add_newlines` puts
+    // them back, and `call_regexp_common` joins differently depending on
+    // which state it finds. Modelling it explicitly is what lets these
+    // chomped lines behave like the original's.
+    let mut has_newlines = true;
+
     for filter in filters {
         if matches!(filter, Filter::RmCommentsInStrings { .. }) && !ctx.options.strip_str_comments {
             continue;
         }
-        lines = apply_one(lines, filter, ctx)?;
+        lines = apply_one(lines, filter, ctx, has_newlines)?;
+        has_newlines = match filter {
+            Filter::PrePostFix { .. } | Filter::CallRegexpCommon { .. } => false,
+            Filter::AddNewlines => true,
+            _ => has_newlines,
+        };
         lines = remove_blank_lines(lines, ctx.eol_continuation)?;
     }
 
@@ -83,7 +95,12 @@ pub fn apply_chain(
     Ok(lines)
 }
 
-fn apply_one(lines: Vec<String>, filter: &Filter, ctx: &FilterContext<'_>) -> Result<Vec<String>> {
+fn apply_one(
+    lines: Vec<String>,
+    filter: &Filter,
+    ctx: &FilterContext<'_>,
+    has_newlines: bool,
+) -> Result<Vec<String>> {
     Ok(match filter {
         Filter::RemoveMatches { re } => {
             let re = regex_cache::cached(&caseless(re))?;
@@ -96,7 +113,10 @@ fn apply_one(lines: Vec<String>, filter: &Filter, ctx: &FilterContext<'_>) -> Re
                 let re = regex_cache::cached(&caseless(re))?;
                 lines
                     .into_iter()
-                    .map(|l| re.replace(&l, "").into_owned())
+                    .map(|l| {
+                        let stripped = re.replace(&nl(&l), "").into_owned();
+                        stripped.strip_suffix('\n').unwrap_or(&stripped).to_string()
+                    })
                     .collect()
             }
         }
@@ -120,11 +140,11 @@ fn apply_one(lines: Vec<String>, filter: &Filter, ctx: &FilterContext<'_>) -> Re
             let mut out = Vec::with_capacity(lines.len());
             let mut between = false;
             for line in lines {
-                if !between && start.is_match(&line)? {
+                if !between && start.is_match(&nl(&line))? {
                     between = true;
                     continue;
                 }
-                if between && end.is_match(&line)? {
+                if between && end.is_match(&nl(&line))? {
                     between = false;
                     continue;
                 }
@@ -171,12 +191,17 @@ fn apply_one(lines: Vec<String>, filter: &Filter, ctx: &FilterContext<'_>) -> Re
             lines
                 .into_iter()
                 .filter(|l| !is_blank(l))
-                .map(|l| re.replace_all(&l, replacement.as_str()).into_owned())
+                .map(|l| {
+                    let r = re.replace_all(&nl(&l), replacement.as_str()).into_owned();
+                    r.strip_suffix('\n').unwrap_or(&r).to_string()
+                })
                 .filter(|l| !is_blank(l))
                 .collect()
         }
         Filter::RemoveHtmlComments => remove_html_comments(lines)?,
-        Filter::CallRegexpCommon { dialect } => call_regexp_common(lines, *dialect),
+        Filter::CallRegexpCommon { dialect } => {
+            call_regexp_common(lines, *dialect, has_newlines)
+        }
         Filter::RemoveF77Comments => lines
             .into_iter()
             .filter(|l| !(starts_with_any(l, &['*', 'c', 'C']) || trimmed(l).starts_with('!')))
@@ -232,12 +257,20 @@ fn apply_one(lines: Vec<String>, filter: &Filter, ctx: &FilterContext<'_>) -> Re
             .collect(),
         Filter::JupyterNb => jupyter_nb(lines),
         Filter::CallParseCivet => call_parse_civet(lines)?,
-        // With newline-free lines, re-attaching newlines is a no-op: the
-        // multi-line filters insert their own separators when joining.
+        // The content is unchanged; what this filter restores is the
+        // newline-bearing state, which the caller tracks.
         Filter::AddNewlines => lines,
         Filter::PrePostFix { prefix, postfix } => {
-            let mut out = Vec::with_capacity(lines.len() + 2);
-            out.push(prefix.clone());
+            // `$prefix . join("", @lines) . $postfix` then split on newlines.
+            // The joined text already ends in a newline, so the postfix
+            // becomes a line of its own -- but the prefix, having none,
+            // merges into the first line rather than preceding it.
+            let mut out = Vec::with_capacity(lines.len() + 1);
+            let mut lines = lines.into_iter();
+            match lines.next() {
+                Some(first) => out.push(format!("{prefix}{first}")),
+                None => out.push(prefix.clone()),
+            }
             out.extend(lines);
             out.push(postfix.clone());
             out
@@ -276,6 +309,20 @@ fn caseless(re: &str) -> String {
     format!("(?i){re}")
 }
 
+/// A line as the original's regexes see it: with its newline still attached.
+///
+/// The filters here hold lines chomped, but the Perl ones run before the
+/// chomp at the end of `rm_comments`, so `\s`, `.` and `[^x]` can all match
+/// the terminator. A lone `#` in Imba is a comment only because `^\s*#\s`
+/// matches the newline; a lone `/` opens a Slim comment only because
+/// `/[^!]` does. Dropping the newline silently turns such lines into code.
+fn nl(line: &str) -> String {
+    let mut s = String::with_capacity(line.len() + 1);
+    s.push_str(line);
+    s.push('\n');
+    s
+}
+
 fn is_blank(line: &str) -> bool {
     line.chars().all(char::is_whitespace)
 }
@@ -291,7 +338,7 @@ fn starts_with_any(line: &str, chars: &[char]) -> bool {
 fn retain_unmatched(lines: Vec<String>, re: &Regex) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
-        if !re.is_match(&line)? {
+        if !re.is_match(&nl(&line))? {
             out.push(line);
         }
     }
@@ -300,11 +347,43 @@ fn retain_unmatched(lines: Vec<String>, re: &Regex) -> Result<Vec<String>> {
 
 fn first_match(lines: &[String], re: &Regex) -> Result<Option<usize>> {
     for (i, line) in lines.iter().enumerate() {
-        if re.is_match(line)? {
+        if re.is_match(&nl(line))? {
             return Ok(Some(i));
         }
     }
     Ok(None)
+}
+
+/// The initial blank-line pass, which is language-aware.
+///
+/// Only this first pass consults the language: X++ also treats a line holding
+/// nothing but `#` as blank. The blank sweeps that follow each filter use the
+/// plain rule, so they go through [`remove_blank_lines`].
+pub fn remove_blank_lines_for_language(
+    lines: Vec<String>,
+    continuation: Option<&str>,
+    language: &str,
+) -> Result<Vec<String>> {
+    if language != "X++" {
+        return remove_blank_lines(lines, continuation);
+    }
+    let blank = regex_cache::cached(r"^\s*#?\s*$")?;
+    let cont_re = match continuation {
+        Some(c) => Some(regex_cache::cached(&caseless(c))?),
+        None => None,
+    };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let is_blank_here = blank.is_match(&nl(line))?;
+        let drop = match (i, cont_re) {
+            (0, _) | (_, None) => is_blank_here,
+            (_, Some(re)) => is_blank_here && !re.is_match(&nl(&lines[i - 1]))?,
+        };
+        if !drop {
+            out.push(line.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// Drop blank lines, honouring a language's line-continuation marker: a blank
@@ -319,7 +398,7 @@ pub fn remove_blank_lines(lines: Vec<String>, continuation: Option<&str>) -> Res
         let drop = if i == 0 {
             is_blank(line)
         } else {
-            is_blank(line) && !cont_re.is_match(&lines[i - 1])?
+            is_blank(line) && !cont_re.is_match(&nl(&lines[i - 1]))?
         };
         if !drop {
             out.push(line.clone());
@@ -805,16 +884,43 @@ fn jsp_comment_line(
 
 /// Join the lines, strip comments of `dialect`, and split again.
 ///
-/// Every line keeps its own separator. The original appears to special-case
-/// C++ here, but at that point its lines still carry their newlines: a
-/// continued line is appended as-is (one newline) while an ordinary line gets
-/// a second one, and the resulting blank lines are swept up by the blank pass
-/// that follows every filter. So no lines are ever merged, and joining
-/// uniformly is equivalent. Backslash continuation of a `//` comment is the
-/// scanner's business, not the joiner's.
-fn call_regexp_common(lines: Vec<String>, dialect: CommentDialect) -> Vec<String> {
-    let mut text = lines.join("\n");
-    text.push('\n');
+/// How the join is spelled depends on whether the lines would still carry
+/// their terminators in the original, because it appends one newline of its
+/// own on top of whatever is already there:
+///
+/// | dialect | lines carry `\n` | separator |
+/// | --- | --- | --- |
+/// | C++ | yes | `\n\n` |
+/// | C++ | no  | `\n`   |
+/// | other | yes | `\n` |
+/// | other | no  | none  |
+///
+/// The doubled separator is not cosmetic. A `//` comment consumes its
+/// terminating newline, so with two the line boundary survives and with one
+/// the next line is merged in. That is exactly what happens to Specman e,
+/// whose chain begins with `pre_post_fix` and therefore reaches the scanner
+/// without terminators. The surplus blank lines are swept up by the blank
+/// pass that follows every filter.
+///
+/// The bottom row is why `add_newlines` exists: without it a second
+/// `call_regexp_common` would run the whole file together into one line.
+fn call_regexp_common(
+    lines: Vec<String>,
+    dialect: CommentDialect,
+    has_newlines: bool,
+) -> Vec<String> {
+    let terminator = match (dialect, has_newlines) {
+        (CommentDialect::Cpp, true) => "\n\n",
+        (CommentDialect::Cpp, false) => "\n",
+        (_, true) => "\n",
+        (_, false) => "",
+    };
+
+    let mut text = String::new();
+    for line in &lines {
+        text.push_str(line);
+        text.push_str(terminator);
+    }
 
     dialects::strip_comments(&text, dialect)
         .split('\n')
@@ -830,7 +936,7 @@ fn remove_f90_comments(lines: Vec<String>) -> Result<Vec<String>> {
     let comment = regex_cache::cached(r"^(\s*!|\s*$)")?;
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
-        if !comment.is_match(&line)? || directive.is_match(&line)? {
+        if !comment.is_match(&nl(&line))? || directive.is_match(&nl(&line))? {
             out.push(line);
         }
     }
@@ -1152,7 +1258,7 @@ fn remove_indented_block(lines: Vec<String>, pattern: &str) -> Result<Vec<String
             } else {
                 continue;
             }
-        } else if let Some(caps) = re.captures(&expanded)? {
+        } else if let Some(caps) = re.captures(&nl(&expanded))? {
             in_comment = caps.get(1).map_or(0, |m| m.as_str().len()) + 1;
             continue;
         }
@@ -1168,11 +1274,11 @@ fn reduce_to_rmd_code_blocks(lines: Vec<String>) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(lines.len());
     let mut in_block = false;
     for line in lines {
-        if open.is_match(&line)? {
+        if open.is_match(&nl(&line))? {
             in_block = true;
             continue;
         }
-        if close.is_match(&line)? {
+        if close.is_match(&nl(&line))? {
             in_block = false;
         }
         if in_block {
@@ -1392,7 +1498,8 @@ fn call_parse_civet(lines: Vec<String>) -> Result<Vec<String>> {
         let step = remove_between(lines, &hash, &hash)?;
         retain_unmatched(step, regex_cache::cached(&caseless(r"^\s*#"))?)
     } else {
-        let step = call_regexp_common(lines, CommentDialect::C);
+        // Civet reaches this helper with lines still terminated.
+        let step = call_regexp_common(lines, CommentDialect::C, true);
         let step = retain_unmatched(step, regex_cache::cached(&caseless(r"^///"))?)?;
         let step = retain_unmatched(step, regex_cache::cached(&caseless(r"^\s*//[^/]"))?)?;
         remove_between(step, &hash, &hash)

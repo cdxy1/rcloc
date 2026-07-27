@@ -22,9 +22,36 @@ pub fn translate(perl: &str) -> String {
     let mut out = String::with_capacity(perl.len());
     let bytes: Vec<char> = perl.chars().collect();
     let mut i = 0;
+    let mut in_class = false;
 
     while i < bytes.len() {
         let c = bytes[i];
+
+        // Track character classes so `$` and `\` inside them are left alone.
+        if !in_class && c == '[' {
+            in_class = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if in_class && c == ']' {
+            in_class = false;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Perl's `$` matches at the end of the string *or* just before a
+        // final newline. Rust's matches only at the end. Since lines are
+        // offered to these patterns with their newline attached — which is
+        // how the original sees them — the difference is load-bearing, so
+        // spell Perl's meaning out.
+        if c == '$' && !in_class {
+            out.push_str(r"(?=\n?\z)");
+            i += 1;
+            continue;
+        }
+
         if c != '\\' || i + 1 >= bytes.len() {
             out.push(c);
             i += 1;

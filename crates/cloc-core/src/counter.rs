@@ -78,7 +78,7 @@ pub fn count_lines(
     let after_blanks = if language == "COBOL" {
         filters::remove_cobol_blanks(lines)
     } else {
-        filters::remove_blank_lines(lines, continuation)?
+        filters::remove_blank_lines_for_language(lines, continuation, language)?
     };
     let blank = total - after_blanks.len();
 

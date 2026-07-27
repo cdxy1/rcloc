@@ -88,12 +88,15 @@ fn strip_c_style(text: &str, line_comments: bool) -> String {
                 }
             }
             if line_comments && bytes[i + 1] == b'/' {
-                // A `//` comment ends at the newline. A C compiler would let
-                // a trailing backslash continue it onto the next line, but
-                // Regexp::Common does not, and cloc counts the continued
-                // line as code -- which matters for any language whose
-                // string literals use backslash continuation.
-                i = end_of_line(bytes, i + 2);
+                // A `//` comment takes its terminating newline with it. That
+                // is invisible in ordinary C++ because the caller hands this
+                // scanner two newlines per line, but it is what merges lines
+                // when only one is present -- see `call_regexp_common`.
+                //
+                // A C compiler would also let a trailing backslash continue
+                // the comment onto the next line; Regexp::Common does not,
+                // and cloc counts the continued line as code.
+                i = past_end_of_line(bytes, i + 2);
                 continue;
             }
         }
@@ -208,10 +211,19 @@ fn strip_brainfuck(text: &str) -> String {
         .collect()
 }
 
-/// Byte index just past the next newline at or after `from`, or end of input.
+/// Byte index of the next newline at or after `from`, or end of input. The
+/// newline itself is left in place.
 fn end_of_line(bytes: &[u8], from: usize) -> usize {
     match memchr::memchr(b'\n', &bytes[from..]) {
-        Some(off) => from + off, // keep the newline itself
+        Some(off) => from + off,
+        None => bytes.len(),
+    }
+}
+
+/// As [`end_of_line`], but consuming the newline as well.
+fn past_end_of_line(bytes: &[u8], from: usize) -> usize {
+    match memchr::memchr(b'\n', &bytes[from..]) {
+        Some(off) => from + off + 1,
         None => bytes.len(),
     }
 }
@@ -246,12 +258,15 @@ mod tests {
 
     #[test]
     fn cpp_line_and_block_comments() {
-        assert_eq!(strip_comments("a // b\nc", CommentDialect::Cpp), "a \nc");
+        // The line comment takes its newline with it; the filter layer
+        // compensates by supplying two.
+        assert_eq!(strip_comments("a // b\nc", CommentDialect::Cpp), "a c");
+        assert_eq!(strip_comments("a // b\n\nc", CommentDialect::Cpp), "a \nc");
         assert_eq!(strip_comments("a /* b */ c", CommentDialect::Cpp), "a  c");
         // `//` inside a block comment does not end it early.
         assert_eq!(strip_comments("a /* // */ b", CommentDialect::Cpp), "a  b");
         // `/*` inside a line comment does not open a block.
-        assert_eq!(strip_comments("a // /* \nb", CommentDialect::Cpp), "a \nb");
+        assert_eq!(strip_comments("a // /* \n\nb", CommentDialect::Cpp), "a \nb");
     }
 
     /// A C compiler continues a `//` comment past a trailing backslash.
@@ -261,8 +276,8 @@ mod tests {
     #[test]
     fn cpp_line_comment_stops_at_the_newline_despite_a_backslash() {
         assert_eq!(
-            strip_comments("a // b\\\nstill code\nc", CommentDialect::Cpp),
-            "a \nstill code\nc"
+            strip_comments("a // b\\\n\nstill code\n\nc", CommentDialect::Cpp),
+            "a \nstill code\n\nc"
         );
     }
 
@@ -278,7 +293,7 @@ mod tests {
     #[test]
     fn scanning_continues_past_an_unterminated_opener() {
         assert_eq!(
-            strip_comments("a /* x */ b /* c\nd // e\n", CommentDialect::Cpp),
+            strip_comments("a /* x */ b /* c\nd // e\n\n", CommentDialect::Cpp),
             "a  b /* c\nd \n"
         );
     }
