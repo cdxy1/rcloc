@@ -13,7 +13,7 @@
 
 ```console
 $ rcloc --hide-rate --thousands-delimiter=, crates
-◉ rcloc 0.1.0
+◉ rcloc 0.2.0
   Fast source insights, powered by Rust
 
 ┌──────────────────────┬───────────┬────────────────┬────────────────┬────────────────┐
