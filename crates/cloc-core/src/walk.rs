@@ -34,6 +34,20 @@ pub struct WalkOptions {
     pub skip_hidden: bool,
 }
 
+/// Directories cloc always skips, regardless of `--exclude-dir`. Their
+/// contents shadow the files of interest — a `.git` checkout in particular is
+/// full of sample hooks that would otherwise be counted as shell scripts.
+pub const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
+    ".svn",
+    ".cvs",
+    ".hg",
+    ".git",
+    ".bzr",
+    ".snapshot", // NetApp backups
+    ".config",
+    ".venv", // Python virtual environment
+];
+
 /// A file that survived the walk, plus anything skipped and why.
 #[derive(Debug, Default)]
 pub struct WalkResult {
@@ -97,7 +111,7 @@ fn dir_allowed(path: &Path, opts: &WalkOptions) -> Result<bool> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if opts.exclude_dirs.contains(&name) {
+    if opts.exclude_dirs.contains(&name) || ALWAYS_EXCLUDED_DIRS.contains(&name.as_str()) {
         return Ok(false);
     }
     let as_str = path.to_string_lossy();
@@ -183,9 +197,10 @@ fn consider(
             return Ok(());
         }
     };
+    // A zero-length file is skipped outright rather than counted as an empty
+    // one, which also disposes of named pipes and sockets.
     if metadata.len() == 0 {
-        // Empty files are counted, but with nothing in them.
-        result.files.push(path.to_path_buf());
+        skip("zero sized file", result);
         return Ok(());
     }
     if let Some(limit) = opts.max_file_size_mb {
@@ -294,6 +309,27 @@ mod tests {
         let file = root.join("a.rs");
         let r = collect(&[file.clone(), file], &WalkOptions::default()).unwrap();
         assert_eq!(r.files.len(), 1);
+    }
+
+    /// Version control metadata is skipped without being asked: a .git
+    /// checkout is full of sample hooks that would be counted as shell.
+    #[test]
+    fn vcs_directories_are_always_excluded() {
+        let root = tree(
+            "vcs",
+            &[("a.rs", "fn a(){}"), (".git/hooks/pre-commit.sample", "#!/bin/sh\necho")],
+        );
+        let r = collect(&[root.clone()], &WalkOptions::default()).unwrap();
+        assert_eq!(names(&r, &root), vec!["a.rs"]);
+    }
+
+    /// Zero-length files are skipped, not counted as empty ones.
+    #[test]
+    fn zero_length_files_are_skipped() {
+        let root = tree("zero", &[("a.rs", "fn a(){}"), ("__init__.py", "")]);
+        let r = collect(&[root.clone()], &WalkOptions::default()).unwrap();
+        assert_eq!(names(&r, &root), vec!["a.rs"]);
+        assert!(r.ignored.iter().any(|(_, why)| why == "zero sized file"));
     }
 
     /// An explicitly named file is counted even when a filter would exclude

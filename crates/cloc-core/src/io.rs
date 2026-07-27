@@ -71,12 +71,74 @@ pub fn first_line(path: &Path) -> Result<Option<String>> {
     Ok(lines_from_bytes(&line).into_iter().next())
 }
 
-/// Whether a file looks binary, using cloc's rule: a NUL byte in the first
-/// chunk. Binary files are skipped unless `--read-binary-files`.
+/// Whether a file looks binary. Binary files are skipped unless
+/// `--read-binary-files`.
+///
+/// cloc delegates this to Perl's `-B`, so we reimplement that rather than
+/// invent a rule: it decides from the first 512 bytes, and its verdict is
+/// what keeps, say, a Latin-1 encoded source file out of the counts.
 pub fn is_binary(path: &Path) -> Result<bool> {
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; 512];
     let n = File::open(path)?.read(&mut buf)?;
-    Ok(buf[..n].contains(&0))
+    Ok(looks_binary(&buf[..n]))
+}
+
+/// Perl's `-B` heuristic: a NUL anywhere in the block means binary, and
+/// otherwise a block is binary when more than a third of it is "odd".
+///
+/// Odd means a control character other than the usual whitespace and escape,
+/// or a high-bit byte that is not part of a valid UTF-8 sequence. That last
+/// clause is why a UTF-8 file full of Cyrillic counts as text while the same
+/// text in Latin-1 does not.
+pub fn looks_binary(block: &[u8]) -> bool {
+    if block.is_empty() {
+        return false;
+    }
+    if block.contains(&0) {
+        return true;
+    }
+
+    let mut odd = 0usize;
+    let mut i = 0usize;
+    while i < block.len() {
+        let b = block[i];
+        if b & 0x80 != 0 {
+            match utf8_sequence_len(&block[i..]) {
+                Some(len) => {
+                    i += len;
+                    continue;
+                }
+                None => odd += 1,
+            }
+        } else if b < 32 && !matches!(b, b'\n' | b'\r' | 8 | b'\t' | 12 | 27) {
+            odd += 1;
+        }
+        i += 1;
+    }
+
+    odd * 3 > block.len()
+}
+
+/// Length of the valid UTF-8 sequence starting at `bytes[0]`, if there is one.
+///
+/// A sequence cut off by the end of the block is accepted at its available
+/// length: the block boundary is arbitrary and should not make a text file
+/// look binary.
+fn utf8_sequence_len(bytes: &[u8]) -> Option<usize> {
+    let first = bytes[0];
+    let len = match first {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return None,
+    };
+    let available = len.min(bytes.len());
+    for &b in &bytes[1..available] {
+        if b & 0xC0 != 0x80 {
+            return None;
+        }
+    }
+    Some(available)
 }
 
 #[cfg(test)]
@@ -117,5 +179,37 @@ mod tests {
     #[test]
     fn invalid_utf8_does_not_lose_lines() {
         assert_eq!(lines_from_bytes(b"a\n\xff\xfe_bad\nc").len(), 3);
+    }
+
+    #[test]
+    fn plain_ascii_is_text() {
+        assert!(!looks_binary(b"int main() { return 0; }\n"));
+    }
+
+    #[test]
+    fn a_nul_byte_means_binary() {
+        assert!(looks_binary(b"ELF\x00\x01\x02 and then some text"));
+    }
+
+    /// The same words in UTF-8 and in Latin-1 must land on opposite sides:
+    /// valid UTF-8 is text, lone high bytes are not.
+    #[test]
+    fn utf8_is_text_but_latin1_is_binary() {
+        assert!(!looks_binary("Русский текст в файле".as_bytes()));
+        let latin1: Vec<u8> = (0..40).map(|i| 0xC0 + (i % 30) as u8).collect();
+        assert!(looks_binary(&latin1));
+    }
+
+    /// A little high-bit content in mostly-ASCII text is still text.
+    #[test]
+    fn occasional_odd_bytes_stay_text() {
+        let mut block = b"plain ascii source code line after line, ".to_vec();
+        block.push(0xFF);
+        assert!(!looks_binary(&block));
+    }
+
+    #[test]
+    fn empty_block_is_not_binary() {
+        assert!(!looks_binary(b""));
     }
 }
