@@ -40,7 +40,7 @@ pub struct OutputOptions {
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const URL: &str = "github.com/AlDanial/cloc";
+const URL: &str = "https://github.com/cdxy1/rcloc";
 
 pub fn render(report: &Report, format: Format, opts: &OutputOptions) -> String {
     match format {
@@ -75,10 +75,12 @@ fn header(report: &Report, opts: &OutputOptions) -> String {
     }
     let n = report.files.len();
     if opts.hide_rate || report.elapsed_secs <= 0.0 {
-        format!("{URL} v {VERSION}\n")
+        format!("◉ rcloc {VERSION}\n  Fast source insights, powered by Rust\n\n")
     } else {
         format!(
-            "{URL} v {VERSION}  T={:.2} s ({:.1} files/s, {:.1} lines/s)\n",
+            "◉ rcloc {VERSION}\n  {} files · {} lines · {:.2}s · {:.0} files/s · {:.0} lines/s\n\n",
+            n,
+            report.totals().counts.total(),
             report.elapsed_secs,
             n as f64 / report.elapsed_secs,
             report.totals().counts.total() as f64 / report.elapsed_secs,
@@ -158,58 +160,57 @@ fn text(report: &Report, opts: &OutputOptions) -> String {
         .unwrap_or(20)
         .max(20);
 
-    let mut column_width = 9 + 14 * 3;
-    if opts.by_file {
-        column_width -= 9;
-    }
-    if with_total {
-        column_width += 14;
-    }
-    let total_width = first_width + column_width;
-    let rule = "-".repeat(total_width);
-
     let mut out = header(report, opts);
-    out.push_str(&rule);
-    out.push('\n');
 
-    // --by-file has no per-row file count, so that column is dropped.
-    let _ = write!(out, "{:<width$}", first_heading, width = first_width);
-    if !opts.by_file {
-        let _ = write!(out, "{:>9}", "files");
-    }
     // The headings gain a percent sign so the columns cannot be misread.
     let (blank_head, comment_head, code_head) = if opts.by_percent.is_some() {
         ("blank %", "comment %", "code %")
     } else {
         ("blank", "comment", "code")
     };
-    let _ = write!(out, "{blank_head:>14}{comment_head:>14}{code_head:>14}");
-    if with_total {
-        let _ = write!(out, "{:>14}", "total");
+    let mut widths = vec![first_width];
+    if !opts.by_file {
+        widths.push(9);
     }
-    out.push('\n');
-    out.push_str(&rule);
-    out.push('\n');
+    widths.extend([14, 14, 14]);
+    if with_total {
+        widths.push(14);
+    }
+
+    table_border(&mut out, &widths, '┌', '┬', '┐');
+    let mut headings = vec![first_heading.to_string()];
+    if !opts.by_file {
+        headings.push("files".to_string());
+    }
+    headings.extend([blank_head, comment_head, code_head].map(str::to_string));
+    if with_total {
+        headings.push("total".to_string());
+    }
+    table_row(&mut out, &headings, &widths);
+    table_border(&mut out, &widths, '├', '┼', '┤');
 
     let overall = report.totals().counts;
     let row = |label: &str, totals: LanguageTotals, show_files: bool, out: &mut String| {
-        let _ = write!(out, "{:<width$}", label, width = first_width);
+        let mut cells = vec![label.to_string()];
         if show_files {
-            let _ = write!(out, "{:>9}", number(totals.files, opts));
+            cells.push(number(totals.files, opts));
         }
         let [blank, comment, code] = count_columns(totals.counts, overall, opts);
-        let _ = write!(out, "{blank:>14}{comment:>14}{code:>14}");
+        cells.extend([blank, comment, code]);
         if with_total {
-            let _ = write!(out, "{:>14}", number(totals.counts.total(), opts));
+            cells.push(number(totals.counts.total(), opts));
         }
-        out.push('\n');
+        table_row(out, &cells, &widths);
     };
 
     if opts.by_file {
         for f in report.files_by_code() {
             row(
                 &f.path.to_string_lossy(),
-                LanguageTotals { files: 1, counts: f.counts },
+                LanguageTotals {
+                    files: 1,
+                    counts: f.counts,
+                },
                 false,
                 &mut out,
             );
@@ -224,13 +225,38 @@ fn text(report: &Report, opts: &OutputOptions) -> String {
     // it out unless asked.
     let show_sum = opts.sum_one || report.files.len() > 1;
     if show_sum {
-        out.push_str(&rule);
-        out.push('\n');
+        table_border(&mut out, &widths, '├', '┼', '┤');
         row("SUM:", report.totals(), !opts.by_file, &mut out);
     }
-    out.push_str(&rule);
-    out.push('\n');
+    table_border(&mut out, &widths, '└', '┴', '┘');
     out
+}
+
+/// Draw one horizontal edge of the terminal table.
+fn table_border(out: &mut String, widths: &[usize], left: char, join: char, right: char) {
+    out.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(width + 2));
+        out.push(if index + 1 == widths.len() {
+            right
+        } else {
+            join
+        });
+    }
+    out.push('\n');
+}
+
+/// Draw a row. The first cell is left-aligned; measurements are right-aligned.
+fn table_row(out: &mut String, cells: &[String], widths: &[usize]) {
+    out.push('│');
+    for (index, (cell, width)) in cells.iter().zip(widths).enumerate() {
+        if index == 0 {
+            let _ = write!(out, " {cell:<width$} │", width = width);
+        } else {
+            let _ = write!(out, " {cell:>width$} │", width = width);
+        }
+    }
+    out.push('\n');
 }
 
 // --- json ----------------------------------------------------------------- {{{1
@@ -529,12 +555,20 @@ mod tests {
                 FileEntry {
                     path: PathBuf::from("src/main.rs"),
                     language: "Rust".to_string(),
-                    counts: Counts { blank: 2, comment: 3, code: 10 },
+                    counts: Counts {
+                        blank: 2,
+                        comment: 3,
+                        code: 10,
+                    },
                 },
                 FileEntry {
                     path: PathBuf::from("setup.py"),
                     language: "Python".to_string(),
-                    counts: Counts { blank: 1, comment: 1, code: 4 },
+                    counts: Counts {
+                        blank: 1,
+                        comment: 1,
+                        code: 4,
+                    },
                 },
             ],
             ignored: vec![],
@@ -546,7 +580,14 @@ mod tests {
     fn totals_sum_the_files() {
         let t = sample().totals();
         assert_eq!(t.files, 2);
-        assert_eq!(t.counts, Counts { blank: 3, comment: 4, code: 14 });
+        assert_eq!(
+            t.counts,
+            Counts {
+                blank: 3,
+                comment: 4,
+                code: 14
+            }
+        );
     }
 
     /// Languages are ordered by code descending.
@@ -559,18 +600,33 @@ mod tests {
 
     #[test]
     fn text_report_lines_up() {
-        let out = text(&sample(), &OutputOptions { quiet: true, ..Default::default() });
+        let out = text(
+            &sample(),
+            &OutputOptions {
+                quiet: true,
+                ..Default::default()
+            },
+        );
         assert!(out.contains("Language"));
         assert!(out.contains("Rust"));
         assert!(out.contains("SUM:"));
         // Every rule and row must be the same width.
         let widths: Vec<usize> = out.lines().map(|l| l.chars().count()).collect();
-        assert!(widths.windows(2).all(|w| w[0] == w[1]), "ragged: {widths:?}");
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "ragged: {widths:?}"
+        );
     }
 
     #[test]
     fn json_is_parseable_and_carries_the_sum() {
-        let out = json(&sample(), &OutputOptions { quiet: true, ..Default::default() });
+        let out = json(
+            &sample(),
+            &OutputOptions {
+                quiet: true,
+                ..Default::default()
+            },
+        );
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(v["SUM"]["code"], 14);
         assert_eq!(v["Rust"]["nFiles"], 1);
@@ -578,7 +634,11 @@ mod tests {
 
     #[test]
     fn json_by_file_keys_on_paths() {
-        let opts = OutputOptions { by_file: true, quiet: true, ..Default::default() };
+        let opts = OutputOptions {
+            by_file: true,
+            quiet: true,
+            ..Default::default()
+        };
         let out = json(&sample(), &opts);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(v["src/main.rs"]["language"], "Rust");
@@ -627,16 +687,32 @@ mod tests {
     fn sum_row_appears_only_for_multiple_files_unless_forced() {
         let mut one = sample();
         one.files.truncate(1);
-        let plain = text(&one, &OutputOptions { quiet: true, ..Default::default() });
+        let plain = text(
+            &one,
+            &OutputOptions {
+                quiet: true,
+                ..Default::default()
+            },
+        );
         assert!(!plain.contains("SUM:"));
 
         let forced = text(
             &one,
-            &OutputOptions { quiet: true, sum_one: true, ..Default::default() },
+            &OutputOptions {
+                quiet: true,
+                sum_one: true,
+                ..Default::default()
+            },
         );
         assert!(forced.contains("SUM:"));
 
-        let two = text(&sample(), &OutputOptions { quiet: true, ..Default::default() });
+        let two = text(
+            &sample(),
+            &OutputOptions {
+                quiet: true,
+                ..Default::default()
+            },
+        );
         assert!(two.contains("SUM:"));
     }
 
@@ -652,7 +728,7 @@ mod tests {
         let out = text(&sample(), &opts);
         assert!(out.contains("blank %"));
         assert!(out.lines().last().is_some());
-        let sum_line = out.lines().find(|l| l.starts_with("SUM:")).unwrap();
+        let sum_line = out.lines().find(|l| l.contains("│ SUM:")).unwrap();
         assert_eq!(sum_line.matches("100.00").count(), 3);
     }
 
@@ -666,7 +742,7 @@ mod tests {
             ..Default::default()
         };
         let out = text(&sample(), &opts);
-        let rust = out.lines().find(|l| l.starts_with("Rust")).unwrap();
+        let rust = out.lines().find(|l| l.contains("│ Rust")).unwrap();
         // 2 blank, 3 comment, 10 code out of 15.
         assert!(rust.contains("13.33"));
         assert!(rust.contains("20.00"));
@@ -678,14 +754,22 @@ mod tests {
     fn fmt_selects_the_layout() {
         let with_total = text(
             &sample(),
-            &OutputOptions { quiet: true, fmt: Some(2), ..Default::default() },
+            &OutputOptions {
+                quiet: true,
+                fmt: Some(2),
+                ..Default::default()
+            },
         );
         assert!(with_total.contains("total"));
         assert!(with_total.contains("Language"));
 
         let by_file = text(
             &sample(),
-            &OutputOptions { quiet: true, fmt: Some(3), ..Default::default() },
+            &OutputOptions {
+                quiet: true,
+                fmt: Some(3),
+                ..Default::default()
+            },
         );
         assert!(by_file.contains("File"));
         assert!(by_file.contains("src/main.rs"));
@@ -705,7 +789,7 @@ mod tests {
         assert!(!out.contains("Python"));
         assert!(out.contains("Rust"));
         // The SUM is unchanged: folding moves rows, it does not drop them.
-        let sum = out.lines().find(|l| l.starts_with("SUM:")).unwrap();
+        let sum = out.lines().find(|l| l.contains("│ SUM:")).unwrap();
         assert!(sum.contains("14"));
     }
 
@@ -741,7 +825,6 @@ pub fn render_diff(report: &DiffReport, format: Format, opts: &OutputOptions) ->
 
 /// The four dispositions, in the order cloc prints them.
 const DISPOSITIONS: [&str; 4] = ["same", "modified", "added", "removed"];
-
 
 fn pick(delta: Delta, which: &str) -> usize {
     match which {
@@ -898,7 +981,10 @@ fn diff_json(report: &DiffReport, opts: &OutputOptions) -> String {
 fn diff_csv(report: &DiffReport, opts: &OutputOptions) -> String {
     let d = opts.csv_delimiter.as_deref().unwrap_or(",");
     let mut out = String::new();
-    let _ = writeln!(out, "disposition{d}language{d}files{d}blank{d}comment{d}code");
+    let _ = writeln!(
+        out,
+        "disposition{d}language{d}files{d}blank{d}comment{d}code"
+    );
     for which in DISPOSITIONS {
         for (language, counts) in &report.by_language {
             let row = (

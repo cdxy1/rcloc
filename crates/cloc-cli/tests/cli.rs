@@ -266,7 +266,7 @@ fn percentages_and_counts_describe_the_same_run() {
     let pct = run_in(&root, &["--quiet", "--percent"]);
     assert!(pct.contains("blank %"));
     // The SUM row of a column-wise percentage report is 100 across.
-    let sum = pct.lines().find(|l| l.starts_with("SUM:")).unwrap();
+    let sum = pct.lines().find(|l| l.contains("│ SUM:")).unwrap();
     assert_eq!(sum.matches("100.00").count(), 3);
     assert_eq!(plain["SUM"]["nFiles"], 3);
 }

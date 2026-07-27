@@ -12,7 +12,7 @@
 [![No runtime](https://img.shields.io/badge/runtime_dependencies-none-22c55e.svg)](#install)
 
 ```console
-$ rcloc .
+$ cloc-rs --thousands-delimiter=, .
 ◉ rcloc 0.1.0
   189 files · 21,121 lines · 0.15s · 1,229 files/s
 
