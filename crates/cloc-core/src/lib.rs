@@ -8,4 +8,5 @@ pub mod dialects;
 pub mod filters;
 pub mod io;
 pub mod regex_cache;
+pub mod vcs;
 pub mod walk;

@@ -52,7 +52,15 @@ pub fn lines_from_bytes(bytes: &[u8]) -> Vec<String> {
 
     let text = String::from_utf8_lossy(body);
     if text.is_empty() {
-        return Vec::new();
+        // A file holding nothing but a byte-order mark still has a line in
+        // it. The original forces a trailing newline onto the raw content
+        // and only then strips the mark, which leaves one blank line behind;
+        // stripping first and finding nothing left would lose it.
+        return if bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![String::new()]
+        };
     }
     let text = text.strip_suffix('\n').unwrap_or(&text);
     text.split('\n')
@@ -179,6 +187,13 @@ mod tests {
     #[test]
     fn invalid_utf8_does_not_lose_lines() {
         assert_eq!(lines_from_bytes(b"a\n\xff\xfe_bad\nc").len(), 3);
+    }
+
+    /// A file consisting only of a byte-order mark is one blank line, not
+    /// an empty file.
+    #[test]
+    fn a_lone_bom_is_one_blank_line() {
+        assert_eq!(lines_from_bytes(b"\xef\xbb\xbf"), vec![""]);
     }
 
     #[test]

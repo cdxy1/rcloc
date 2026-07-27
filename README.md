@@ -20,8 +20,9 @@ numbers may not.
 ## Status
 
 Counting works end to end and agrees with the original on the corpora below.
-Not yet built: `--diff` and its relatives, git/VCS input, archive extraction,
-`--sql` and `--html` output, and the `--*-lang-def` family.
+Not yet built: `--diff` and its relatives, `--sql` and `--html` output, and
+the percentage and formatting options (`--by-percent`, `--sum-one`, `--fmt`,
+`--summary-cutoff`, `--xsl`).
 
 | Corpus | Files | Mismatches |
 | --- | ---: | ---: |
@@ -31,7 +32,13 @@ Not yet built: `--diff` and its relatives, git/VCS input, archive extraction,
 | `/usr/share/vim` | 1896 | 0 |
 | Python 3.12 standard library | 578 | 0 |
 | `/usr/share/doc`, `/etc`, git-core | 4452 | 2 |
-| `tests/inputs` (cloc's own corpus) | 345 | 9 |
+| `tests/inputs` (cloc's own corpus) | 345 | 0 |
+| This repository via `--vcs=git` | 940 | 2 |
+
+The two are `tests/inputs/issues/370/arduino_issue_370.ino` and
+`tests/inputs/issues/806/huffman.java`, both fixtures for upstream bugs. Each
+turns on how `replace_between_regex` carries state from one line to the next
+when its end pattern can match the empty string.
 
 On `/usr/share/perl5` the Rust build runs in 0.025 s against the original's
 0.786 s.

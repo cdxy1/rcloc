@@ -10,6 +10,7 @@ use cloc_core::classify::{self, Classification, ClassifyOptions};
 use cloc_core::counter::{self, CountOptions};
 use cloc_core::dedupe;
 use cloc_core::filters::FilterOptions;
+use cloc_core::vcs;
 use cloc_core::walk::{self, WalkOptions};
 use cloc_lang::LangDb;
 use output::{Format, OutputOptions};
@@ -142,6 +143,13 @@ struct Cli {
     /// Language to assume for files with no extension.
     #[arg(long = "lang-no-ext", alias = "lang_no_ext", value_name = "LANG")]
     lang_no_ext: Option<String>,
+    /// Take the file list from a version control system: git, svn, auto, or
+    /// any command that prints one path per line.
+    #[arg(long, alias = "files-from", value_name = "VCS")]
+    vcs: Option<String>,
+    /// Include code in git submodules.
+    #[arg(long = "include-submodules", alias = "include_submodules")]
+    include_submodules: bool,
     /// Unpack archives with this command; `>FILE<` stands for the archive.
     #[arg(long = "extract-with", alias = "extract_with", value_name = "CMD")]
     extract_with: Option<String>,
@@ -351,8 +359,20 @@ fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
         },
     )?;
 
+    // --vcs asks the versioning system for the file list rather than
+    // walking the disk, so build outputs and ignored files never appear.
+    let generator = match &cli.vcs {
+        Some(spec) => Some(vcs::resolve(spec, cli.include_submodules)?),
+        None => None,
+    };
+
+    let mut exclude_dirs = split_list(&cli.exclude_dir);
+    if let Some(g) = &generator {
+        exclude_dirs.extend(g.exclude_dirs.iter().cloned());
+    }
+
     let walk_opts = WalkOptions {
-        exclude_dirs: split_list(&cli.exclude_dir),
+        exclude_dirs,
         match_f: cli.match_f.clone(),
         not_match_f: cli.not_match_f.clone(),
         match_d: cli.match_d.clone(),
@@ -365,7 +385,10 @@ fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
         max_file_size_mb: cli.max_file_size,
         skip_hidden: cli.skip_hidden,
     };
-    let found = walk::collect(&inputs, &walk_opts)?;
+    let found = match &generator {
+        Some(g) => walk::collect_listed(&vcs::list_files(g, &inputs)?, &walk_opts)?,
+        None => walk::collect(&inputs, &walk_opts)?,
+    };
 
     let classify_opts = ClassifyOptions {
         autoconf: cli.autoconf,

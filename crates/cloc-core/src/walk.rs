@@ -110,6 +110,23 @@ pub fn collect(inputs: &[PathBuf], opts: &WalkOptions) -> Result<WalkResult> {
     Ok(result)
 }
 
+/// Apply the same filters to an externally supplied list of files.
+///
+/// Used for `--vcs`, where the file list comes from git rather than from
+/// walking. The name and size filters still apply -- the original runs them
+/// over the generated list too -- but nothing is discovered here.
+pub fn collect_listed(files: &[PathBuf], opts: &WalkOptions) -> Result<WalkResult> {
+    let mut result = WalkResult::default();
+    let mut seen = HashSet::new();
+    for path in files {
+        consider(path, opts, &mut result, &mut seen, false)?;
+    }
+    result
+        .files
+        .sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    Ok(result)
+}
+
 /// Whether to descend into a directory.
 fn dir_allowed(path: &Path, opts: &WalkOptions) -> Result<bool> {
     let name = path
