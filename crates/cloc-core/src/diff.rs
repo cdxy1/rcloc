@@ -223,6 +223,23 @@ pub fn split_code_and_comments(
     (code, comments)
 }
 
+/// Per-line classification, in the order the lines appear.
+///
+/// `true` means the line survived comment stripping and is therefore code.
+/// Same mechanism as [`split_code_and_comments`], but keeping the positions
+/// so a caller can annotate the original file.
+pub fn code_line_flags(without_blanks: &[String], without_comments: &[String]) -> Vec<bool> {
+    let mut flags = Vec::with_capacity(without_blanks.len());
+    for row in sdiff(without_blanks, without_comments) {
+        match row.edit {
+            Edit::Same | Edit::Modified => flags.push(true),
+            Edit::Removed => flags.push(false),
+            Edit::Added => {}
+        }
+    }
+    flags
+}
+
 /// Tally of how one category of lines changed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Delta {
@@ -350,6 +367,14 @@ mod tests {
         assert_eq!(d.modified, 1); // b -> B
         assert_eq!(d.removed, 1); // c
         assert_eq!(d.added, 1); // e
+    }
+
+    /// The flags line up one-to-one with the input lines.
+    #[test]
+    fn code_line_flags_align_with_the_input() {
+        let all = lines("a;\n// note\nb;");
+        let code = lines("a;\nb;");
+        assert_eq!(code_line_flags(&all, &code), vec![true, false, true]);
     }
 
     /// Comment classification falls out of diffing a file against its

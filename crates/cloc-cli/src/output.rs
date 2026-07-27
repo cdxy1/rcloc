@@ -35,6 +35,8 @@ pub struct OutputOptions {
     pub cutoff: Option<Cutoff>,
     /// `--fmt=N`: one of five alternate text layouts.
     pub fmt: Option<u8>,
+    /// `--xsl`: stylesheet to reference from the XML output.
+    pub xsl: Option<String>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -444,7 +446,17 @@ fn markdown(report: &Report, opts: &OutputOptions) -> String {
 // --- xml ------------------------------------------------------------------ {{{1
 
 fn xml(report: &Report, opts: &OutputOptions) -> String {
-    let mut out = String::from("<?xml version=\"1.0\"?>\n<results>\n");
+    let mut out = String::from("<?xml version=\"1.0\"?>\n");
+    // The stylesheet reference has to sit between the declaration and the
+    // root element, which is why it is written here rather than appended.
+    if let Some(sheet) = &opts.xsl {
+        let _ = writeln!(
+            out,
+            "<?xml-stylesheet type=\"text/xsl\" href=\"{}\"?>",
+            xml_escape(sheet)
+        );
+    }
+    out.push_str("<results>\n");
     if !opts.quiet {
         let _ = write!(
             out,
@@ -585,6 +597,23 @@ mod tests {
     fn csv_quotes_fields_containing_the_delimiter() {
         assert_eq!(csv_field("a,b", ","), "\"a,b\"");
         assert_eq!(csv_field("plain", ","), "plain");
+    }
+
+    /// `--xsl` inserts the stylesheet reference after the declaration and
+    /// before the root element, where a processor will look for it.
+    #[test]
+    fn xsl_reference_precedes_the_root_element() {
+        let opts = OutputOptions {
+            quiet: true,
+            xsl: Some("cloc.xsl".to_string()),
+            ..Default::default()
+        };
+        let out = xml(&sample(), &opts);
+        let decl = out.find("<?xml version").unwrap();
+        let sheet = out.find("<?xml-stylesheet").unwrap();
+        let root = out.find("<results>").unwrap();
+        assert!(decl < sheet && sheet < root);
+        assert!(out.contains("href=\"cloc.xsl\""));
     }
 
     #[test]

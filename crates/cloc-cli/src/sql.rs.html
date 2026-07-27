@@ -1,0 +1,338 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="GENERATOR" content="cloc http://github.com/AlDanial/cloc">
+
+<!-- Created by cloc v2.11 -->
+<title>crates/cloc-cli/src/sql.rs</title>
+
+<style TYPE="text/css">
+<!--
+    body {
+        color: black;
+        background-color: white;
+        font-family: monospace
+    }
+
+    .whitespace {
+        background-color: gray;
+    }
+
+    .comment {
+        color: gray;
+        font-style: italic;
+    }
+
+    .clinenum {
+        color: red;
+    }
+
+    .linenum {
+        color: green;
+    }
+ -->
+</style>
+</head>
+<body>
+<pre><tt>
+&nbsp; <span class="clinenum"> 001 </span> &nbsp;<span class="comment">//! `--sql`: results as SQL statements, for loading into SQLite or Oracle.</span> &nbsp;
+&nbsp; <span class="clinenum"> 002 </span> &nbsp;<span class="comment">//!</span> &nbsp;
+&nbsp; <span class="clinenum"> 003 </span> &nbsp;<span class="comment">//! One row per file rather than per language, so the database can be asked</span> &nbsp;
+&nbsp; <span class="clinenum"> 004 </span> &nbsp;<span class="comment">//! questions the text report cannot answer.</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 001 </span> &nbsp;<span class="normal">use crate::report::Report;</span> &nbsp;
+&nbsp; <span class="linenum"> 002 </span> &nbsp;<span class="normal">use cloc_lang::LangDb;</span> &nbsp;
+&nbsp; <span class="linenum"> 003 </span> &nbsp;<span class="normal">use std::fmt::Write as _;</span> &nbsp;
+&nbsp; <span class="linenum"> 004 </span> &nbsp;<span class="normal">use std::path::Path;</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 005 </span> &nbsp;<span class="comment">/// Which dialect to emit.</span> &nbsp;
+&nbsp; <span class="linenum"> 005 </span> &nbsp;<span class="normal">#[derive(Debug, Clone, Copy, PartialEq, Eq)]</span> &nbsp;
+&nbsp; <span class="linenum"> 006 </span> &nbsp;<span class="normal">pub enum SqlStyle {</span> &nbsp;
+&nbsp; <span class="clinenum"> 006 </span> &nbsp;<span class="comment">    /// SQLite and friends: `begin transaction` ... `commit`.</span> &nbsp;
+&nbsp; <span class="linenum"> 007 </span> &nbsp;<span class="normal">    Default,</span> &nbsp;
+&nbsp; <span class="clinenum"> 007 </span> &nbsp;<span class="comment">    /// As above, but each INSERT names its columns.</span> &nbsp;
+&nbsp; <span class="linenum"> 008 </span> &nbsp;<span class="normal">    NamedColumns,</span> &nbsp;
+&nbsp; <span class="clinenum"> 008 </span> &nbsp;<span class="comment">    /// Oracle: `TO_TIMESTAMP`, `VARCHAR2`, no transaction wrapper.</span> &nbsp;
+&nbsp; <span class="linenum"> 009 </span> &nbsp;<span class="normal">    Oracle,</span> &nbsp;
+&nbsp; <span class="linenum"> 010 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 011 </span> &nbsp;<span class="normal">impl SqlStyle {</span> &nbsp;
+&nbsp; <span class="linenum"> 012 </span> &nbsp;<span class="normal">    pub fn parse(name: &amp;str) -&gt; Option&lt;Self&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 013 </span> &nbsp;<span class="normal">        Some(match name.to_lowercase().as_str() {</span> &nbsp;
+&nbsp; <span class="linenum"> 014 </span> &nbsp;<span class="normal">            "" | "default" | "sqlite" =&gt; Self::Default,</span> &nbsp;
+&nbsp; <span class="linenum"> 015 </span> &nbsp;<span class="normal">            "named_columns" | "named-columns" =&gt; Self::NamedColumns,</span> &nbsp;
+&nbsp; <span class="linenum"> 016 </span> &nbsp;<span class="normal">            "oracle" =&gt; Self::Oracle,</span> &nbsp;
+&nbsp; <span class="linenum"> 017 </span> &nbsp;<span class="normal">            _ =&gt; return None,</span> &nbsp;
+&nbsp; <span class="linenum"> 018 </span> &nbsp;<span class="normal">        })</span> &nbsp;
+&nbsp; <span class="linenum"> 019 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+&nbsp; <span class="linenum"> 020 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 009 </span> &nbsp;<span class="comment">/// Options for the SQL writer.</span> &nbsp;
+&nbsp; <span class="linenum"> 021 </span> &nbsp;<span class="normal">#[derive(Debug, Clone)]</span> &nbsp;
+&nbsp; <span class="linenum"> 022 </span> &nbsp;<span class="normal">pub struct SqlOptions {</span> &nbsp;
+&nbsp; <span class="linenum"> 023 </span> &nbsp;<span class="normal">    pub style: SqlStyle,</span> &nbsp;
+&nbsp; <span class="clinenum"> 010 </span> &nbsp;<span class="comment">    /// `--sql-append`: add rows to an existing file, so no schema is emitted.</span> &nbsp;
+&nbsp; <span class="linenum"> 024 </span> &nbsp;<span class="normal">    pub append: bool,</span> &nbsp;
+&nbsp; <span class="clinenum"> 011 </span> &nbsp;<span class="comment">    /// `--sql-project`: the identifier rows are tagged with.</span> &nbsp;
+&nbsp; <span class="linenum"> 025 </span> &nbsp;<span class="normal">    pub project: String,</span> &nbsp;
+&nbsp; <span class="clinenum"> 012 </span> &nbsp;<span class="comment">    /// Seconds the run took, recorded in the metadata row.</span> &nbsp;
+&nbsp; <span class="linenum"> 026 </span> &nbsp;<span class="normal">    pub elapsed_secs: f64,</span> &nbsp;
+&nbsp; <span class="clinenum"> 013 </span> &nbsp;<span class="comment">    /// Unix timestamp used as the run's id.</span> &nbsp;
+&nbsp; <span class="linenum"> 027 </span> &nbsp;<span class="normal">    pub id: i64,</span> &nbsp;
+&nbsp; <span class="clinenum"> 014 </span> &nbsp;<span class="comment">    /// Human-readable timestamp for the metadata row.</span> &nbsp;
+&nbsp; <span class="linenum"> 028 </span> &nbsp;<span class="normal">    pub timestamp: String,</span> &nbsp;
+&nbsp; <span class="linenum"> 029 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 015 </span> &nbsp;<span class="comment">/// Render a report as SQL.</span> &nbsp;
+&nbsp; <span class="linenum"> 030 </span> &nbsp;<span class="normal">pub fn render(report: &amp;Report, db: &amp;LangDb, opts: &amp;SqlOptions) -&gt; String {</span> &nbsp;
+&nbsp; <span class="linenum"> 031 </span> &nbsp;<span class="normal">    let mut out = String::new();</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 016 </span> &nbsp;<span class="comment">    // With --sql-append the tables already exist; emitting the schema again</span> &nbsp;
+&nbsp; <span class="clinenum"> 017 </span> &nbsp;<span class="comment">    // would fail the load.</span> &nbsp;
+&nbsp; <span class="linenum"> 032 </span> &nbsp;<span class="normal">    if !opts.append {</span> &nbsp;
+&nbsp; <span class="linenum"> 033 </span> &nbsp;<span class="normal">        out.push_str(schema(opts.style));</span> &nbsp;
+&nbsp; <span class="linenum"> 034 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 035 </span> &nbsp;<span class="normal">    match opts.style {</span> &nbsp;
+&nbsp; <span class="linenum"> 036 </span> &nbsp;<span class="normal">        SqlStyle::Oracle =&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 037 </span> &nbsp;<span class="normal">            let _ = writeln!(</span> &nbsp;
+&nbsp; <span class="linenum"> 038 </span> &nbsp;<span class="normal">                out,</span> &nbsp;
+&nbsp; <span class="linenum"> 039 </span> &nbsp;<span class="normal">                "insert into metadata values({}, TO_TIMESTAMP('{}','yyyy-mm-dd hh24:mi:ss'), '{}', {:.6});",</span> &nbsp;
+&nbsp; <span class="linenum"> 040 </span> &nbsp;<span class="normal">                opts.id,</span> &nbsp;
+&nbsp; <span class="linenum"> 041 </span> &nbsp;<span class="normal">                opts.timestamp,</span> &nbsp;
+&nbsp; <span class="linenum"> 042 </span> &nbsp;<span class="normal">                quote(&amp;opts.project),</span> &nbsp;
+&nbsp; <span class="linenum"> 043 </span> &nbsp;<span class="normal">                opts.elapsed_secs,</span> &nbsp;
+&nbsp; <span class="linenum"> 044 </span> &nbsp;<span class="normal">            );</span> &nbsp;
+&nbsp; <span class="linenum"> 045 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 046 </span> &nbsp;<span class="normal">        SqlStyle::NamedColumns =&gt; out.push_str("begin transaction;\n"),</span> &nbsp;
+&nbsp; <span class="linenum"> 047 </span> &nbsp;<span class="normal">        SqlStyle::Default =&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 048 </span> &nbsp;<span class="normal">            out.push_str("begin transaction;\n");</span> &nbsp;
+&nbsp; <span class="linenum"> 049 </span> &nbsp;<span class="normal">            let _ = writeln!(</span> &nbsp;
+&nbsp; <span class="linenum"> 050 </span> &nbsp;<span class="normal">                out,</span> &nbsp;
+&nbsp; <span class="linenum"> 051 </span> &nbsp;<span class="normal">                "insert into metadata values({}, '{}', '{}', {:.6});",</span> &nbsp;
+&nbsp; <span class="linenum"> 052 </span> &nbsp;<span class="normal">                opts.id,</span> &nbsp;
+&nbsp; <span class="linenum"> 053 </span> &nbsp;<span class="normal">                opts.timestamp,</span> &nbsp;
+&nbsp; <span class="linenum"> 054 </span> &nbsp;<span class="normal">                quote(&amp;opts.project),</span> &nbsp;
+&nbsp; <span class="linenum"> 055 </span> &nbsp;<span class="normal">                opts.elapsed_secs,</span> &nbsp;
+&nbsp; <span class="linenum"> 056 </span> &nbsp;<span class="normal">            );</span> &nbsp;
+&nbsp; <span class="linenum"> 057 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 058 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 059 </span> &nbsp;<span class="normal">    let insert = match opts.style {</span> &nbsp;
+&nbsp; <span class="linenum"> 060 </span> &nbsp;<span class="normal">        SqlStyle::NamedColumns =&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 061 </span> &nbsp;<span class="normal">            "insert into t (id, Project, Language, File, File_dirname, \</span> &nbsp;
+&nbsp; <span class="linenum"> 062 </span> &nbsp;<span class="normal">             File_basename, nBlank, nComment, nCode, nScaled ) values"</span> &nbsp;
+&nbsp; <span class="linenum"> 063 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 064 </span> &nbsp;<span class="normal">        _ =&gt; "insert into t values",</span> &nbsp;
+&nbsp; <span class="linenum"> 065 </span> &nbsp;<span class="normal">    };</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 066 </span> &nbsp;<span class="normal">    for (n, entry) in report.files_by_code().iter().enumerate() {</span> &nbsp;
+&nbsp; <span class="linenum"> 067 </span> &nbsp;<span class="normal">        let path = entry.path.to_string_lossy();</span> &nbsp;
+&nbsp; <span class="linenum"> 068 </span> &nbsp;<span class="normal">        let dirname = entry</span> &nbsp;
+&nbsp; <span class="linenum"> 069 </span> &nbsp;<span class="normal">            .path</span> &nbsp;
+&nbsp; <span class="linenum"> 070 </span> &nbsp;<span class="normal">            .parent()</span> &nbsp;
+&nbsp; <span class="linenum"> 071 </span> &nbsp;<span class="normal">            .map(|p| p.to_string_lossy().into_owned())</span> &nbsp;
+&nbsp; <span class="linenum"> 072 </span> &nbsp;<span class="normal">            .filter(|s| !s.is_empty())</span> &nbsp;
+&nbsp; <span class="linenum"> 073 </span> &nbsp;<span class="normal">            .unwrap_or_else(|| ".".to_string());</span> &nbsp;
+&nbsp; <span class="linenum"> 074 </span> &nbsp;<span class="normal">        let basename = entry</span> &nbsp;
+&nbsp; <span class="linenum"> 075 </span> &nbsp;<span class="normal">            .path</span> &nbsp;
+&nbsp; <span class="linenum"> 076 </span> &nbsp;<span class="normal">            .file_name()</span> &nbsp;
+&nbsp; <span class="linenum"> 077 </span> &nbsp;<span class="normal">            .map(|p| p.to_string_lossy().into_owned())</span> &nbsp;
+&nbsp; <span class="linenum"> 078 </span> &nbsp;<span class="normal">            .unwrap_or_default();</span> &nbsp;
+&nbsp; <span class="clinenum"> 018 </span> &nbsp;<span class="comment">        // The scaled figure is code weighted by the language's COCOMO-style</span> &nbsp;
+&nbsp; <span class="clinenum"> 019 </span> &nbsp;<span class="comment">        // factor, which is what makes languages comparable.</span> &nbsp;
+&nbsp; <span class="linenum"> 079 </span> &nbsp;<span class="normal">        let scaled = entry.counts.code as f64 * db.scale_factor(&amp;entry.language).unwrap_or(1.0);</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 080 </span> &nbsp;<span class="normal">        let _ = writeln!(</span> &nbsp;
+&nbsp; <span class="linenum"> 081 </span> &nbsp;<span class="normal">            out,</span> &nbsp;
+&nbsp; <span class="linenum"> 082 </span> &nbsp;<span class="normal">            "{insert}({}, '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {:.6});",</span> &nbsp;
+&nbsp; <span class="linenum"> 083 </span> &nbsp;<span class="normal">            opts.id,</span> &nbsp;
+&nbsp; <span class="linenum"> 084 </span> &nbsp;<span class="normal">            quote(&amp;opts.project),</span> &nbsp;
+&nbsp; <span class="linenum"> 085 </span> &nbsp;<span class="normal">            quote(&amp;entry.language),</span> &nbsp;
+&nbsp; <span class="linenum"> 086 </span> &nbsp;<span class="normal">            quote(&amp;path),</span> &nbsp;
+&nbsp; <span class="linenum"> 087 </span> &nbsp;<span class="normal">            quote(&amp;dirname),</span> &nbsp;
+&nbsp; <span class="linenum"> 088 </span> &nbsp;<span class="normal">            quote(&amp;basename),</span> &nbsp;
+&nbsp; <span class="linenum"> 089 </span> &nbsp;<span class="normal">            entry.counts.blank,</span> &nbsp;
+&nbsp; <span class="linenum"> 090 </span> &nbsp;<span class="normal">            entry.counts.comment,</span> &nbsp;
+&nbsp; <span class="linenum"> 091 </span> &nbsp;<span class="normal">            entry.counts.code,</span> &nbsp;
+&nbsp; <span class="linenum"> 092 </span> &nbsp;<span class="normal">            scaled,</span> &nbsp;
+&nbsp; <span class="linenum"> 093 </span> &nbsp;<span class="normal">        );</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 020 </span> &nbsp;<span class="comment">        // Long runs are broken into transactions so a failure does not</span> &nbsp;
+&nbsp; <span class="clinenum"> 021 </span> &nbsp;<span class="comment">        // discard everything.</span> &nbsp;
+&nbsp; <span class="linenum"> 094 </span> &nbsp;<span class="normal">        if opts.style != SqlStyle::Oracle &amp;&amp; (n + 1) % 10_000 == 0 {</span> &nbsp;
+&nbsp; <span class="linenum"> 095 </span> &nbsp;<span class="normal">            out.push_str("commit;\nbegin transaction;\n");</span> &nbsp;
+&nbsp; <span class="linenum"> 096 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 097 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 098 </span> &nbsp;<span class="normal">    if opts.style != SqlStyle::Oracle {</span> &nbsp;
+&nbsp; <span class="linenum"> 099 </span> &nbsp;<span class="normal">        out.push_str("commit;\n");</span> &nbsp;
+&nbsp; <span class="linenum"> 100 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+&nbsp; <span class="linenum"> 101 </span> &nbsp;<span class="normal">    out</span> &nbsp;
+&nbsp; <span class="linenum"> 102 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 022 </span> &nbsp;<span class="comment">/// Double any embedded single quote, which is how SQL escapes it.</span> &nbsp;
+&nbsp; <span class="linenum"> 103 </span> &nbsp;<span class="normal">fn quote(s: &amp;str) -&gt; String {</span> &nbsp;
+&nbsp; <span class="linenum"> 104 </span> &nbsp;<span class="normal">    s.replace('\'', "''")</span> &nbsp;
+&nbsp; <span class="linenum"> 105 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 106 </span> &nbsp;<span class="normal">fn schema(style: SqlStyle) -&gt; &amp;'static str {</span> &nbsp;
+&nbsp; <span class="linenum"> 107 </span> &nbsp;<span class="normal">    match style {</span> &nbsp;
+&nbsp; <span class="linenum"> 108 </span> &nbsp;<span class="normal">        SqlStyle::Oracle =&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 109 </span> &nbsp;<span class="normal">            "</span> &nbsp;
+&nbsp; <span class="linenum"> 110 </span> &nbsp;<span class="normal">CREATE TABLE metadata</span> &nbsp;
+&nbsp; <span class="linenum"> 111 </span> &nbsp;<span class="normal">(</span> &nbsp;
+&nbsp; <span class="linenum"> 112 </span> &nbsp;<span class="normal">  id          INTEGER PRIMARY KEY,</span> &nbsp;
+&nbsp; <span class="linenum"> 113 </span> &nbsp;<span class="normal">  timestamp   TIMESTAMP,</span> &nbsp;
+&nbsp; <span class="linenum"> 114 </span> &nbsp;<span class="normal">  project     VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 115 </span> &nbsp;<span class="normal">  elapsed_s   NUMBER(10, 6)</span> &nbsp;
+&nbsp; <span class="linenum"> 116 </span> &nbsp;<span class="normal">)</span> &nbsp;
+&nbsp; <span class="linenum"> 117 </span> &nbsp;<span class="normal">/</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 118 </span> &nbsp;<span class="normal">CREATE TABLE t</span> &nbsp;
+&nbsp; <span class="linenum"> 119 </span> &nbsp;<span class="normal">(</span> &nbsp;
+&nbsp; <span class="linenum"> 120 </span> &nbsp;<span class="normal">  id             INTEGER           ,</span> &nbsp;
+&nbsp; <span class="linenum"> 121 </span> &nbsp;<span class="normal">  project        VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 122 </span> &nbsp;<span class="normal">  language       VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 123 </span> &nbsp;<span class="normal">  file_fullname  VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 124 </span> &nbsp;<span class="normal">  file_dirname   VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 125 </span> &nbsp;<span class="normal">  file_basename  VARCHAR2(500 CHAR),</span> &nbsp;
+&nbsp; <span class="linenum"> 126 </span> &nbsp;<span class="normal">  nblank         INTEGER,</span> &nbsp;
+&nbsp; <span class="linenum"> 127 </span> &nbsp;<span class="normal">  ncomment       INTEGER,</span> &nbsp;
+&nbsp; <span class="linenum"> 128 </span> &nbsp;<span class="normal">  ncode          INTEGER,</span> &nbsp;
+&nbsp; <span class="linenum"> 129 </span> &nbsp;<span class="normal">  nscaled        NUMBER(10, 6),</span> &nbsp;
+&nbsp; <span class="linenum"> 130 </span> &nbsp;<span class="normal">FOREIGN KEY (id)</span> &nbsp;
+&nbsp; <span class="linenum"> 131 </span> &nbsp;<span class="normal">    REFERENCES metadata (id)</span> &nbsp;
+&nbsp; <span class="linenum"> 132 </span> &nbsp;<span class="normal">)</span> &nbsp;
+&nbsp; <span class="linenum"> 133 </span> &nbsp;<span class="normal">/</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 134 </span> &nbsp;<span class="normal">"</span> &nbsp;
+&nbsp; <span class="linenum"> 135 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 136 </span> &nbsp;<span class="normal">        _ =&gt; {</span> &nbsp;
+&nbsp; <span class="linenum"> 137 </span> &nbsp;<span class="normal">            "</span> &nbsp;
+&nbsp; <span class="linenum"> 138 </span> &nbsp;<span class="normal">create table metadata (</span> &nbsp;
+&nbsp; <span class="linenum"> 139 </span> &nbsp;<span class="normal">                id        integer primary key,</span> &nbsp;
+&nbsp; <span class="linenum"> 140 </span> &nbsp;<span class="normal">                timestamp varchar(500),</span> &nbsp;
+&nbsp; <span class="linenum"> 141 </span> &nbsp;<span class="normal">                Project   varchar(500),</span> &nbsp;
+&nbsp; <span class="linenum"> 142 </span> &nbsp;<span class="normal">                elapsed_s real);</span> &nbsp;
+&nbsp; <span class="linenum"> 143 </span> &nbsp;<span class="normal">create table t        (</span> &nbsp;
+&nbsp; <span class="linenum"> 144 </span> &nbsp;<span class="normal">                id            integer        ,</span> &nbsp;
+&nbsp; <span class="linenum"> 145 </span> &nbsp;<span class="normal">                Project       varchar(500)   ,</span> &nbsp;
+&nbsp; <span class="linenum"> 146 </span> &nbsp;<span class="normal">                Language      varchar(500)   ,</span> &nbsp;
+&nbsp; <span class="linenum"> 147 </span> &nbsp;<span class="normal">                File          varchar(500)   ,</span> &nbsp;
+&nbsp; <span class="linenum"> 148 </span> &nbsp;<span class="normal">                File_dirname  varchar(500)   ,</span> &nbsp;
+&nbsp; <span class="linenum"> 149 </span> &nbsp;<span class="normal">                File_basename varchar(500)   ,</span> &nbsp;
+&nbsp; <span class="linenum"> 150 </span> &nbsp;<span class="normal">                nBlank        integer        ,</span> &nbsp;
+&nbsp; <span class="linenum"> 151 </span> &nbsp;<span class="normal">                nComment      integer        ,</span> &nbsp;
+&nbsp; <span class="linenum"> 152 </span> &nbsp;<span class="normal">                nCode         integer        ,</span> &nbsp;
+&nbsp; <span class="linenum"> 153 </span> &nbsp;<span class="normal">                nScaled       real           ,</span> &nbsp;
+&nbsp; <span class="linenum"> 154 </span> &nbsp;<span class="normal">        foreign key (id)</span> &nbsp;
+&nbsp; <span class="linenum"> 155 </span> &nbsp;<span class="normal">            references metadata (id));</span> &nbsp;
+&nbsp; <span class="linenum"> 156 </span> &nbsp;<span class="normal">"</span> &nbsp;
+&nbsp; <span class="linenum"> 157 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 158 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+&nbsp; <span class="linenum"> 159 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 023 </span> &nbsp;<span class="comment">/// A project identifier defaulting to the working directory, as cloc does.</span> &nbsp;
+&nbsp; <span class="linenum"> 160 </span> &nbsp;<span class="normal">pub fn default_project() -&gt; String {</span> &nbsp;
+&nbsp; <span class="linenum"> 161 </span> &nbsp;<span class="normal">    std::env::current_dir()</span> &nbsp;
+&nbsp; <span class="linenum"> 162 </span> &nbsp;<span class="normal">        .map(|p| p.to_string_lossy().into_owned())</span> &nbsp;
+&nbsp; <span class="linenum"> 163 </span> &nbsp;<span class="normal">        .unwrap_or_default()</span> &nbsp;
+&nbsp; <span class="linenum"> 164 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 024 </span> &nbsp;<span class="comment">/// `dirname` for display, matching the original's use of File::Basename.</span> &nbsp;
+&nbsp; <span class="linenum"> 165 </span> &nbsp;<span class="normal">pub fn dirname_of(path: &amp;Path) -&gt; String {</span> &nbsp;
+&nbsp; <span class="linenum"> 166 </span> &nbsp;<span class="normal">    path.parent()</span> &nbsp;
+&nbsp; <span class="linenum"> 167 </span> &nbsp;<span class="normal">        .map(|p| p.to_string_lossy().into_owned())</span> &nbsp;
+&nbsp; <span class="linenum"> 168 </span> &nbsp;<span class="normal">        .filter(|s| !s.is_empty())</span> &nbsp;
+&nbsp; <span class="linenum"> 169 </span> &nbsp;<span class="normal">        .unwrap_or_else(|| ".".to_string())</span> &nbsp;
+&nbsp; <span class="linenum"> 170 </span> &nbsp;<span class="normal">}</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 171 </span> &nbsp;<span class="normal">#[cfg(test)]</span> &nbsp;
+&nbsp; <span class="linenum"> 172 </span> &nbsp;<span class="normal">mod tests {</span> &nbsp;
+&nbsp; <span class="linenum"> 173 </span> &nbsp;<span class="normal">    use super::*;</span> &nbsp;
+&nbsp; <span class="linenum"> 174 </span> &nbsp;<span class="normal">    use crate::report::FileEntry;</span> &nbsp;
+&nbsp; <span class="linenum"> 175 </span> &nbsp;<span class="normal">    use cloc_core::counter::Counts;</span> &nbsp;
+&nbsp; <span class="linenum"> 176 </span> &nbsp;<span class="normal">    use std::path::PathBuf;</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 177 </span> &nbsp;<span class="normal">    fn sample() -&gt; Report {</span> &nbsp;
+&nbsp; <span class="linenum"> 178 </span> &nbsp;<span class="normal">        Report {</span> &nbsp;
+&nbsp; <span class="linenum"> 179 </span> &nbsp;<span class="normal">            files: vec![FileEntry {</span> &nbsp;
+&nbsp; <span class="linenum"> 180 </span> &nbsp;<span class="normal">                path: PathBuf::from("src/main.rs"),</span> &nbsp;
+&nbsp; <span class="linenum"> 181 </span> &nbsp;<span class="normal">                language: "Rust".to_string(),</span> &nbsp;
+&nbsp; <span class="linenum"> 182 </span> &nbsp;<span class="normal">                counts: Counts { blank: 2, comment: 3, code: 10 },</span> &nbsp;
+&nbsp; <span class="linenum"> 183 </span> &nbsp;<span class="normal">            }],</span> &nbsp;
+&nbsp; <span class="linenum"> 184 </span> &nbsp;<span class="normal">            ignored: vec![],</span> &nbsp;
+&nbsp; <span class="linenum"> 185 </span> &nbsp;<span class="normal">            elapsed_secs: 0.5,</span> &nbsp;
+&nbsp; <span class="linenum"> 186 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 187 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 188 </span> &nbsp;<span class="normal">    fn opts(style: SqlStyle, append: bool) -&gt; SqlOptions {</span> &nbsp;
+&nbsp; <span class="linenum"> 189 </span> &nbsp;<span class="normal">        SqlOptions {</span> &nbsp;
+&nbsp; <span class="linenum"> 190 </span> &nbsp;<span class="normal">            style,</span> &nbsp;
+&nbsp; <span class="linenum"> 191 </span> &nbsp;<span class="normal">            append,</span> &nbsp;
+&nbsp; <span class="linenum"> 192 </span> &nbsp;<span class="normal">            project: "proj".to_string(),</span> &nbsp;
+&nbsp; <span class="linenum"> 193 </span> &nbsp;<span class="normal">            elapsed_secs: 0.5,</span> &nbsp;
+&nbsp; <span class="linenum"> 194 </span> &nbsp;<span class="normal">            id: 1700000000,</span> &nbsp;
+&nbsp; <span class="linenum"> 195 </span> &nbsp;<span class="normal">            timestamp: "2026-07-27 12:00:00".to_string(),</span> &nbsp;
+&nbsp; <span class="linenum"> 196 </span> &nbsp;<span class="normal">        }</span> &nbsp;
+&nbsp; <span class="linenum"> 197 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 198 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 199 </span> &nbsp;<span class="normal">    fn default_style_wraps_inserts_in_a_transaction() {</span> &nbsp;
+&nbsp; <span class="linenum"> 200 </span> &nbsp;<span class="normal">        let out = render(&amp;sample(), LangDb::default_db(), &amp;opts(SqlStyle::Default, false));</span> &nbsp;
+&nbsp; <span class="linenum"> 201 </span> &nbsp;<span class="normal">        assert!(out.contains("create table metadata"));</span> &nbsp;
+&nbsp; <span class="linenum"> 202 </span> &nbsp;<span class="normal">        assert!(out.contains("begin transaction;"));</span> &nbsp;
+&nbsp; <span class="linenum"> 203 </span> &nbsp;<span class="normal">        assert!(out.contains("insert into t values("));</span> &nbsp;
+&nbsp; <span class="linenum"> 204 </span> &nbsp;<span class="normal">        assert!(out.trim_end().ends_with("commit;"));</span> &nbsp;
+&nbsp; <span class="linenum"> 205 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 025 </span> &nbsp;<span class="comment">    /// --sql-append adds rows to an existing database, so re-emitting the</span> &nbsp;
+&nbsp; <span class="clinenum"> 026 </span> &nbsp;<span class="comment">    /// schema would break the load.</span> &nbsp;
+&nbsp; <span class="linenum"> 206 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 207 </span> &nbsp;<span class="normal">    fn append_omits_the_schema() {</span> &nbsp;
+&nbsp; <span class="linenum"> 208 </span> &nbsp;<span class="normal">        let out = render(&amp;sample(), LangDb::default_db(), &amp;opts(SqlStyle::Default, true));</span> &nbsp;
+&nbsp; <span class="linenum"> 209 </span> &nbsp;<span class="normal">        assert!(!out.contains("create table"));</span> &nbsp;
+&nbsp; <span class="linenum"> 210 </span> &nbsp;<span class="normal">        assert!(out.contains("insert into t values("));</span> &nbsp;
+&nbsp; <span class="linenum"> 211 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 212 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 213 </span> &nbsp;<span class="normal">    fn named_columns_lists_the_columns() {</span> &nbsp;
+&nbsp; <span class="linenum"> 214 </span> &nbsp;<span class="normal">        let out = render(</span> &nbsp;
+&nbsp; <span class="linenum"> 215 </span> &nbsp;<span class="normal">            &amp;sample(),</span> &nbsp;
+&nbsp; <span class="linenum"> 216 </span> &nbsp;<span class="normal">            LangDb::default_db(),</span> &nbsp;
+&nbsp; <span class="linenum"> 217 </span> &nbsp;<span class="normal">            &amp;opts(SqlStyle::NamedColumns, false),</span> &nbsp;
+&nbsp; <span class="linenum"> 218 </span> &nbsp;<span class="normal">        );</span> &nbsp;
+&nbsp; <span class="linenum"> 219 </span> &nbsp;<span class="normal">        assert!(out.contains("insert into t (id, Project, Language, File,"));</span> &nbsp;
+&nbsp; <span class="linenum"> 220 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="linenum"> 221 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 222 </span> &nbsp;<span class="normal">    fn oracle_uses_its_own_schema_and_no_transactions() {</span> &nbsp;
+&nbsp; <span class="linenum"> 223 </span> &nbsp;<span class="normal">        let out = render(&amp;sample(), LangDb::default_db(), &amp;opts(SqlStyle::Oracle, false));</span> &nbsp;
+&nbsp; <span class="linenum"> 224 </span> &nbsp;<span class="normal">        assert!(out.contains("VARCHAR2(500 CHAR)"));</span> &nbsp;
+&nbsp; <span class="linenum"> 225 </span> &nbsp;<span class="normal">        assert!(out.contains("TO_TIMESTAMP"));</span> &nbsp;
+&nbsp; <span class="linenum"> 226 </span> &nbsp;<span class="normal">        assert!(!out.contains("begin transaction"));</span> &nbsp;
+&nbsp; <span class="linenum"> 227 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 027 </span> &nbsp;<span class="comment">    /// A quote in a path would otherwise end the string literal early.</span> &nbsp;
+&nbsp; <span class="linenum"> 228 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 229 </span> &nbsp;<span class="normal">    fn single_quotes_are_doubled() {</span> &nbsp;
+&nbsp; <span class="linenum"> 230 </span> &nbsp;<span class="normal">        assert_eq!(quote("it's"), "it''s");</span> &nbsp;
+&nbsp; <span class="linenum"> 231 </span> &nbsp;<span class="normal">        let mut report = sample();</span> &nbsp;
+&nbsp; <span class="linenum"> 232 </span> &nbsp;<span class="normal">        report.files[0].path = PathBuf::from("src/o'brien.rs");</span> &nbsp;
+&nbsp; <span class="linenum"> 233 </span> &nbsp;<span class="normal">        let out = render(&amp;report, LangDb::default_db(), &amp;opts(SqlStyle::Default, false));</span> &nbsp;
+&nbsp; <span class="linenum"> 234 </span> &nbsp;<span class="normal">        assert!(out.contains("o''brien.rs"));</span> &nbsp;
+&nbsp; <span class="linenum"> 235 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+<!-- blank -->
+&nbsp; <span class="clinenum"> 028 </span> &nbsp;<span class="comment">    /// The scaled column is code weighted by the language's factor.</span> &nbsp;
+&nbsp; <span class="linenum"> 236 </span> &nbsp;<span class="normal">    #[test]</span> &nbsp;
+&nbsp; <span class="linenum"> 237 </span> &nbsp;<span class="normal">    fn scaled_column_applies_the_language_factor() {</span> &nbsp;
+&nbsp; <span class="linenum"> 238 </span> &nbsp;<span class="normal">        let db = LangDb::default_db();</span> &nbsp;
+&nbsp; <span class="linenum"> 239 </span> &nbsp;<span class="normal">        let factor = db.scale_factor("Rust").unwrap();</span> &nbsp;
+&nbsp; <span class="linenum"> 240 </span> &nbsp;<span class="normal">        let out = render(&amp;sample(), db, &amp;opts(SqlStyle::Default, false));</span> &nbsp;
+&nbsp; <span class="linenum"> 241 </span> &nbsp;<span class="normal">        assert!(out.contains(&amp;format!("{:.6}", 10.0 * factor)));</span> &nbsp;
+&nbsp; <span class="linenum"> 242 </span> &nbsp;<span class="normal">    }</span> &nbsp;
+&nbsp; <span class="linenum"> 243 </span> &nbsp;<span class="normal">}</span> &nbsp;
+</tt></pre>
+</body>
+</html>

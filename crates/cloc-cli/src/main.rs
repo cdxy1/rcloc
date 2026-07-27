@@ -1,5 +1,6 @@
 //! `cloc-rs` — count lines of code.
 
+mod html;
 mod output;
 mod report;
 mod sql;
@@ -85,6 +86,22 @@ struct Cli {
     /// Alternate text layout, 1 to 5.
     #[arg(long, value_name = "N")]
     fmt: Option<u8>,
+    /// Write a marked-up HTML copy of each counted file.
+    #[arg(long)]
+    html: bool,
+    /// Put generated files beside their source instead of in the current
+    /// directory.
+    #[arg(long = "original-dir", alias = "original_dir")]
+    original_dir: bool,
+    /// Reference this XSL stylesheet from the XML output.
+    #[arg(long, value_name = "FILE")]
+    xsl: Option<String>,
+    /// Skip files that take more than N seconds to diff; 0 means no limit.
+    #[arg(long = "diff-timeout", alias = "diff_timeout", value_name = "N")]
+    diff_timeout: Option<u64>,
+    /// Skip files that take more than N seconds to count; 0 means no limit.
+    #[arg(long, value_name = "N")]
+    timeout: Option<u64>,
     /// Write SQL statements to FILE, or to standard output for `-`.
     #[arg(long, value_name = "FILE")]
     sql: Option<String>,
@@ -569,6 +586,41 @@ fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
     Ok(())
 }
 
+/// Write the marked-up copy `--html` asks for.
+fn write_html(
+    path: &Path,
+    language: &str,
+    db: &LangDb,
+    opts: &CountOptions,
+    original_dir: bool,
+) -> Result<()> {
+    use cloc_core::filters::{self, FilterContext};
+
+    let continuation = db.eol_continuation(language);
+    let lines = cloc_core::io::read_lines(path)?;
+    let without_blanks =
+        filters::remove_blank_lines_for_language(lines, continuation, language)?;
+    let ctx = FilterContext {
+        options: &opts.filters,
+        file: path,
+        language,
+        eol_continuation: continuation,
+    };
+    let without_comments = filters::apply_chain(
+        without_blanks.clone(),
+        db.filters(language).unwrap_or(&[]),
+        &ctx,
+    )?;
+
+    let page = html::render(
+        &path.to_string_lossy(),
+        &without_blanks,
+        &without_comments,
+    );
+    let target = html::output_path(path, original_dir);
+    std::fs::write(&target, page).with_context(|| format!("writing {}", target.display()))
+}
+
 fn classify_options(cli: &Cli) -> ClassifyOptions {
     ClassifyOptions {
         autoconf: cli.autoconf,
@@ -627,10 +679,15 @@ fn output_options(cli: &Cli) -> Result<OutputOptions> {
         sum_one: cli.sum_one,
         cutoff,
         fmt: cli.fmt,
+        xsl: cli.xsl.clone(),
     })
 }
 
 fn format_of(cli: &Cli) -> Format {
+    // --xsl has nothing to attach itself to unless the output is XML.
+    if cli.xsl.is_some() {
+        return Format::Xml;
+    }
     if cli.json {
         Format::Json
     } else if cli.yaml {
@@ -752,6 +809,11 @@ fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
             }
             if exclude_lang.contains(&language) {
                 return Outcome::Skipped(path.clone(), "in --exclude-lang".to_string());
+            }
+            if cli.html {
+                // Best effort: a page that cannot be written is not a
+                // reason to lose the count it was meant to illustrate.
+                let _ = write_html(path, &language, db, &count_opts, cli.original_dir);
             }
             match counter::count_file(path, &language, db, &count_opts) {
                 Ok(counts) => Outcome::Counted(FileEntry {
