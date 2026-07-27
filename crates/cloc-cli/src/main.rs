@@ -2,6 +2,7 @@
 
 mod output;
 mod report;
+mod sql;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -67,6 +68,33 @@ struct Cli {
     /// Group digits in the text report.
     #[arg(long = "thousands-delimiter", alias = "ksep", value_name = "CHAR")]
     thousands_delimiter: Option<String>,
+    /// Show comment and blank counts as percentages of X: t, c, cm, cb, cmb.
+    #[arg(long = "by-percent", alias = "by_percent", value_name = "X")]
+    by_percent: Option<String>,
+    /// Same as --by-percent t.
+    #[arg(long)]
+    percent: bool,
+    /// Show the SUM row even for a single input file.
+    #[arg(long = "sum-one", alias = "sum_one")]
+    sum_one: bool,
+    /// Fold languages below a threshold into "Other", as X:N or X:N%.
+    #[arg(long = "summary-cutoff", alias = "summary_cutoff", value_name = "X:N")]
+    summary_cutoff: Option<String>,
+    /// Alternate text layout, 1 to 5.
+    #[arg(long, value_name = "N")]
+    fmt: Option<u8>,
+    /// Write SQL statements to FILE, or to standard output for `-`.
+    #[arg(long, value_name = "FILE")]
+    sql: Option<String>,
+    /// Emit only INSERTs, for adding to an existing database.
+    #[arg(long = "sql-append", alias = "sql_append")]
+    sql_append: bool,
+    /// Project identifier recorded with each row.
+    #[arg(long = "sql-project", alias = "sql_project", value_name = "NAME")]
+    sql_project: Option<String>,
+    /// SQL dialect: default, named_columns or oracle.
+    #[arg(long = "sql-style", alias = "sql_style", value_name = "STYLE")]
+    sql_style: Option<String>,
 
     // --- selecting files ---
     /// Comma-separated directory names to skip.
@@ -143,6 +171,9 @@ struct Cli {
     /// Language to assume for files with no extension.
     #[arg(long = "lang-no-ext", alias = "lang_no_ext", value_name = "LANG")]
     lang_no_ext: Option<String>,
+    /// Take the list of files and directories from FILE, one per line.
+    #[arg(long = "list-file", alias = "list_file", value_name = "FILE")]
+    list_file: Option<PathBuf>,
     /// Take the file list from a version control system: git, svn, auto, or
     /// any command that prints one path per line.
     #[arg(long, alias = "files-from", value_name = "VCS")]
@@ -250,17 +281,44 @@ fn run() -> Result<()> {
     let mut report = count(&cli, db)?;
     report.elapsed_secs = started.elapsed().as_secs_f64();
 
-    let rendered = output::render(
-        &report,
-        format_of(&cli),
-        &OutputOptions {
-            by_file: cli.by_file,
-            hide_rate: cli.hide_rate,
-            quiet: cli.quiet,
-            csv_delimiter: cli.csv_delimiter.clone(),
-            thousands_delimiter: cli.thousands_delimiter.clone(),
-        },
-    );
+    // --sql is a whole different shape of output: one row per file, with a
+    // metadata row, rather than a table of languages.
+    let rendered = match &cli.sql {
+        Some(target) => {
+            let style = cli.sql_style.as_deref().unwrap_or("");
+            let style = sql::SqlStyle::parse(style)
+                .with_context(|| format!("--sql-style expects default, named_columns or oracle, got {style:?}"))?;
+            let text = sql::render(
+                &report,
+                db,
+                &sql::SqlOptions {
+                    style,
+                    append: cli.sql_append,
+                    project: cli
+                        .sql_project
+                        .clone()
+                        .unwrap_or_else(sql::default_project),
+                    elapsed_secs: report.elapsed_secs,
+                    id: now_unix(),
+                    timestamp: now_timestamp(),
+                },
+            );
+            if target != "-" {
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(cli.sql_append)
+                    .write(true)
+                    .truncate(!cli.sql_append)
+                    .open(target)
+                    .with_context(|| format!("writing {target}"))?;
+                use std::io::Write as _;
+                file.write_all(text.as_bytes())?;
+                return Ok(());
+            }
+            text
+        }
+        None => output::render(&report, format_of(&cli), &output_options(&cli)?),
+    };
 
     match &cli.report_file {
         Some(path) => {
@@ -324,6 +382,74 @@ fn write_definitions(db: &LangDb, path: &std::path::Path, include_dup: bool) -> 
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Seconds since the epoch, used as the id tying a run's SQL rows together.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `YYYY-MM-DD HH:MM:SS` in UTC, computed without pulling in a date library.
+fn now_timestamp() -> String {
+    let secs = now_unix();
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // Civil-from-days, shifting the epoch to 1 March 0000 so leap days fall
+    // at the end of the cycle and the month arithmetic stays branch-free.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+fn output_options(cli: &Cli) -> Result<OutputOptions> {
+    // --percent is spelled out as --by-percent t.
+    let by_percent = match (&cli.by_percent, cli.percent) {
+        (Some(spec), _) => Some(
+            report::Denominator::parse(spec)
+                .with_context(|| format!("--by-percent expects t, c, cm, cb or cmb, got {spec:?}"))?,
+        ),
+        (None, true) => Some(report::Denominator::ColumnTotal),
+        (None, false) => None,
+    };
+
+    let cutoff = match &cli.summary_cutoff {
+        Some(spec) => Some(
+            report::Cutoff::parse(spec)
+                .with_context(|| format!("--summary-cutoff expects X:N or X:N%, got {spec:?}"))?,
+        ),
+        None => None,
+    };
+
+    if let Some(n) = cli.fmt {
+        if !(1..=5).contains(&n) {
+            bail!("--fmt expects a number from 1 to 5, got {n}");
+        }
+    }
+
+    Ok(OutputOptions {
+        by_file: cli.by_file,
+        hide_rate: cli.hide_rate,
+        quiet: cli.quiet,
+        csv_delimiter: cli.csv_delimiter.clone(),
+        thousands_delimiter: cli.thousands_delimiter.clone(),
+        by_percent,
+        sum_one: cli.sum_one,
+        cutoff,
+        fmt: cli.fmt,
+    })
+}
+
 fn format_of(cli: &Cli) -> Format {
     if cli.json {
         Format::Json
@@ -341,8 +467,20 @@ fn format_of(cli: &Cli) -> Format {
 }
 
 fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
-    // --skip-archive drops matching inputs before anything is unpacked.
+    // --list-file supplies inputs from a file, one per line.
     let mut inputs = cli.inputs.clone();
+    if let Some(path) = &cli.list_file {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        inputs.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(PathBuf::from),
+        );
+    }
+
+    // --skip-archive drops matching inputs before anything is unpacked.
     if let Some(pattern) = &cli.skip_archive {
         let re = cloc_core::regex_cache::cached(&format!("(?:{pattern})$"))?;
         inputs.retain(|p| !re.is_match(&p.to_string_lossy()).unwrap_or(false));

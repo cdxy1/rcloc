@@ -1,6 +1,6 @@
 //! Rendering a report in each supported format.
 
-use crate::report::{LanguageTotals, Report};
+use crate::report::{Cutoff, Denominator, LanguageTotals, Report};
 use std::fmt::Write as _;
 
 /// Output formats.
@@ -27,6 +27,14 @@ pub struct OutputOptions {
     pub csv_delimiter: Option<String>,
     /// `--thousands-delimiter`: group digits in the text report.
     pub thousands_delimiter: Option<String>,
+    /// `--by-percent` / `--percent`: show comment and blank as percentages.
+    pub by_percent: Option<Denominator>,
+    /// `--sum-one`: print the SUM row even for a single input file.
+    pub sum_one: bool,
+    /// `--summary-cutoff`: fold small languages into "Other".
+    pub cutoff: Option<Cutoff>,
+    /// `--fmt=N`: one of five alternate text layouts.
+    pub fmt: Option<u8>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -78,7 +86,58 @@ fn header(report: &Report, opts: &OutputOptions) -> String {
 
 // --- text ----------------------------------------------------------------- {{{1
 
+/// Render one row's three count columns, as numbers or as percentages.
+///
+/// Under `--by-percent X` every column is a percentage of the same row-wise
+/// denominator, so a row shows how it divides between blank, comment and
+/// code. Under `--percent` (`X` = `t`) each column is instead a percentage of
+/// that column's total across the whole report, so a row shows what share of
+/// the project's blanks, comments and code it accounts for.
+fn count_columns(
+    counts: cloc_core::counter::Counts,
+    totals: cloc_core::counter::Counts,
+    opts: &OutputOptions,
+) -> [String; 3] {
+    let Some(denominator) = opts.by_percent else {
+        return [
+            number(counts.blank, opts),
+            number(counts.comment, opts),
+            number(counts.code, opts),
+        ];
+    };
+
+    let pct = |n: usize, divisor: f64| {
+        if divisor <= 0.0 {
+            "0.00".to_string()
+        } else {
+            format!("{:.2}", 100.0 * n as f64 / divisor)
+        }
+    };
+
+    if denominator == Denominator::ColumnTotal {
+        return [
+            pct(counts.blank, totals.blank as f64),
+            pct(counts.comment, totals.comment as f64),
+            pct(counts.code, totals.code as f64),
+        ];
+    }
+    let divisor = denominator.of(counts);
+    [
+        pct(counts.blank, divisor),
+        pct(counts.comment, divisor),
+        pct(counts.code, divisor),
+    ]
+}
+
 fn text(report: &Report, opts: &OutputOptions) -> String {
+    // --fmt selects between by-language and by-file layouts, and whether a
+    // total-lines column appears.
+    let by_file = opts.by_file || matches!(opts.fmt, Some(3 | 4 | 5));
+    let with_total = matches!(opts.fmt, Some(2 | 4));
+    let opts = &OutputOptions {
+        by_file,
+        ..opts.clone()
+    };
     let first_heading = if opts.by_file { "File" } else { "Language" };
     // Widen the first column to fit its longest entry, so long paths under
     // --by-file are not truncated.
@@ -97,8 +156,14 @@ fn text(report: &Report, opts: &OutputOptions) -> String {
         .unwrap_or(20)
         .max(20);
 
-    let cols = [("files", 9usize), ("blank", 14), ("comment", 14), ("code", 14)];
-    let total_width = first_width + cols.iter().map(|c| c.1).sum::<usize>();
+    let mut column_width = 9 + 14 * 3;
+    if opts.by_file {
+        column_width -= 9;
+    }
+    if with_total {
+        column_width += 14;
+    }
+    let total_width = first_width + column_width;
     let rule = "-".repeat(total_width);
 
     let mut out = header(report, opts);
@@ -110,22 +175,32 @@ fn text(report: &Report, opts: &OutputOptions) -> String {
     if !opts.by_file {
         let _ = write!(out, "{:>9}", "files");
     }
-    let _ = writeln!(out, "{:>14}{:>14}{:>14}", "blank", "comment", "code");
+    // The headings gain a percent sign so the columns cannot be misread.
+    let (blank_head, comment_head, code_head) = if opts.by_percent.is_some() {
+        ("blank %", "comment %", "code %")
+    } else {
+        ("blank", "comment", "code")
+    };
+    let _ = write!(out, "{blank_head:>14}{comment_head:>14}{code_head:>14}");
+    if with_total {
+        let _ = write!(out, "{:>14}", "total");
+    }
+    out.push('\n');
     out.push_str(&rule);
     out.push('\n');
 
+    let overall = report.totals().counts;
     let row = |label: &str, totals: LanguageTotals, show_files: bool, out: &mut String| {
         let _ = write!(out, "{:<width$}", label, width = first_width);
         if show_files {
             let _ = write!(out, "{:>9}", number(totals.files, opts));
         }
-        let _ = writeln!(
-            out,
-            "{:>14}{:>14}{:>14}",
-            number(totals.counts.blank, opts),
-            number(totals.counts.comment, opts),
-            number(totals.counts.code, opts),
-        );
+        let [blank, comment, code] = count_columns(totals.counts, overall, opts);
+        let _ = write!(out, "{blank:>14}{comment:>14}{code:>14}");
+        if with_total {
+            let _ = write!(out, "{:>14}", number(totals.counts.total(), opts));
+        }
+        out.push('\n');
     };
 
     if opts.by_file {
@@ -138,14 +213,19 @@ fn text(report: &Report, opts: &OutputOptions) -> String {
             );
         }
     } else {
-        for (lang, totals) in report.languages_by_code() {
-            row(lang, totals, true, &mut out);
+        for (lang, totals) in report.languages_by_code_with_cutoff(opts.cutoff) {
+            row(&lang, totals, true, &mut out);
         }
     }
 
-    out.push_str(&rule);
-    out.push('\n');
-    row("SUM:", report.totals(), !opts.by_file, &mut out);
+    // A single input file makes the SUM row pure repetition, so cloc leaves
+    // it out unless asked.
+    let show_sum = opts.sum_one || report.files.len() > 1;
+    if show_sum {
+        out.push_str(&rule);
+        out.push('\n');
+        row("SUM:", report.totals(), !opts.by_file, &mut out);
+    }
     out.push_str(&rule);
     out.push('\n');
     out
@@ -182,12 +262,12 @@ fn json(report: &Report, opts: &OutputOptions) -> String {
             );
         }
     } else {
-        for (lang, t) in report.languages_by_code() {
+        for (lang, t) in report.languages_by_code_with_cutoff(opts.cutoff) {
             let _ = write!(
                 out,
                 "  {} : {{\n    \"nFiles\" : {},\n    \"blank\" : {},\n    \
                  \"comment\" : {},\n    \"code\" : {}\n  }},\n",
-                json_string(lang),
+                json_string(&lang),
                 t.files,
                 t.counts.blank,
                 t.counts.comment,
@@ -510,6 +590,94 @@ mod tests {
     #[test]
     fn xml_escapes_special_characters() {
         assert_eq!(xml_escape("a<b & c\""), "a&lt;b &amp; c&quot;");
+    }
+
+    /// A single input file makes SUM pure repetition, so it is omitted
+    /// unless --sum-one asks for it.
+    #[test]
+    fn sum_row_appears_only_for_multiple_files_unless_forced() {
+        let mut one = sample();
+        one.files.truncate(1);
+        let plain = text(&one, &OutputOptions { quiet: true, ..Default::default() });
+        assert!(!plain.contains("SUM:"));
+
+        let forced = text(
+            &one,
+            &OutputOptions { quiet: true, sum_one: true, ..Default::default() },
+        );
+        assert!(forced.contains("SUM:"));
+
+        let two = text(&sample(), &OutputOptions { quiet: true, ..Default::default() });
+        assert!(two.contains("SUM:"));
+    }
+
+    /// `--percent` shows each column as a share of that column's total, so
+    /// the SUM row reads 100 across the board.
+    #[test]
+    fn percent_columns_total_to_one_hundred() {
+        let opts = OutputOptions {
+            quiet: true,
+            by_percent: Some(Denominator::ColumnTotal),
+            ..Default::default()
+        };
+        let out = text(&sample(), &opts);
+        assert!(out.contains("blank %"));
+        assert!(out.lines().last().is_some());
+        let sum_line = out.lines().find(|l| l.starts_with("SUM:")).unwrap();
+        assert_eq!(sum_line.matches("100.00").count(), 3);
+    }
+
+    /// `--by-percent cmb` is row-wise instead: a row's three percentages
+    /// account for that row's own lines.
+    #[test]
+    fn by_percent_is_row_wise() {
+        let opts = OutputOptions {
+            quiet: true,
+            by_percent: Some(Denominator::All),
+            ..Default::default()
+        };
+        let out = text(&sample(), &opts);
+        let rust = out.lines().find(|l| l.starts_with("Rust")).unwrap();
+        // 2 blank, 3 comment, 10 code out of 15.
+        assert!(rust.contains("13.33"));
+        assert!(rust.contains("20.00"));
+        assert!(rust.contains("66.67"));
+    }
+
+    /// `--fmt 2` adds a total-lines column; `--fmt 3` switches to by-file.
+    #[test]
+    fn fmt_selects_the_layout() {
+        let with_total = text(
+            &sample(),
+            &OutputOptions { quiet: true, fmt: Some(2), ..Default::default() },
+        );
+        assert!(with_total.contains("total"));
+        assert!(with_total.contains("Language"));
+
+        let by_file = text(
+            &sample(),
+            &OutputOptions { quiet: true, fmt: Some(3), ..Default::default() },
+        );
+        assert!(by_file.contains("File"));
+        assert!(by_file.contains("src/main.rs"));
+    }
+
+    /// `--summary-cutoff` folds small languages into one "Other" row without
+    /// changing the totals.
+    #[test]
+    fn cutoff_folds_small_languages_into_other() {
+        let opts = OutputOptions {
+            quiet: true,
+            cutoff: Cutoff::parse("c:5"),
+            ..Default::default()
+        };
+        let out = text(&sample(), &opts);
+        assert!(out.contains("Other"));
+        assert!(!out.contains("Python"));
+        assert!(out.contains("Rust"));
+        // The SUM is unchanged: folding moves rows, it does not drop them.
+        let sum = out.lines().find(|l| l.starts_with("SUM:")).unwrap();
+        assert!(sum.contains("14"));
     }
 
     #[test]
