@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use cloc_core::classify::{self, Classification, ClassifyOptions};
 use cloc_core::counter::{self, CountOptions};
+use cloc_core::dedupe;
 use cloc_core::filters::FilterOptions;
 use cloc_core::walk::{self, WalkOptions};
 use cloc_lang::LangDb;
@@ -140,6 +141,9 @@ struct Cli {
     /// Language to assume for files with no extension.
     #[arg(long = "lang-no-ext", alias = "lang_no_ext", value_name = "LANG")]
     lang_no_ext: Option<String>,
+    /// Count files whose content duplicates another file.
+    #[arg(long = "skip-uniqueness", alias = "skip_uniqueness")]
+    skip_uniqueness: bool,
     /// Number of worker threads; 0 uses one per core.
     #[arg(long, value_name = "N", default_value_t = 0)]
     processes: usize,
@@ -268,14 +272,24 @@ fn count(cli: &Cli, db: &'static LangDb) -> Result<Report> {
         ignore_regex: cli.ignore_regex.clone(),
     };
 
+    // cloc drops files whose content already appeared elsewhere; a tree of
+    // Python packages is full of identical __init__.py files.
+    let mut ignored = found.ignored;
+    let files = if cli.skip_uniqueness {
+        found.files
+    } else {
+        let deduped = dedupe::remove_duplicates(found.files, db, &classify_opts);
+        ignored.extend(deduped.duplicates);
+        deduped.unique
+    };
+
     let include_lang = split_list(&cli.include_lang);
     let exclude_lang = split_list(&cli.exclude_lang);
     let include_ext = split_list(&cli.include_ext);
 
     // Files are independent, so classifying and counting fans out across
     // cores; only the merge at the end is serial.
-    let outcomes: Vec<Outcome> = found
-        .files
+    let outcomes: Vec<Outcome> = files
         .par_iter()
         .map(|path| {
             if !include_ext.is_empty() {
@@ -312,7 +326,7 @@ fn count(cli: &Cli, db: &'static LangDb) -> Result<Report> {
         .collect();
 
     let mut report = Report {
-        ignored: found.ignored,
+        ignored,
         ..Default::default()
     };
     for outcome in outcomes {

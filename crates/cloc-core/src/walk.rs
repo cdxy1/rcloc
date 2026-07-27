@@ -95,7 +95,12 @@ pub fn collect(inputs: &[PathBuf], opts: &WalkOptions) -> Result<WalkResult> {
                     continue;
                 }
             };
-            if entry.file_type().is_file() {
+            // A symlink to a regular file is a file: cloc tests with -f,
+            // which dereferences. --follow-links governs only whether the
+            // walk descends into symlinked *directories*.
+            if entry.file_type().is_file()
+                || (entry.file_type().is_symlink() && entry.path().is_file())
+            {
                 consider(entry.path(), opts, &mut result, &mut seen, false)?;
             }
         }
@@ -138,8 +143,12 @@ fn consider(
     seen: &mut HashSet<PathBuf>,
     explicit: bool,
 ) -> Result<()> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(canonical) {
+    // Deliberately keyed on the path as given, not its canonical form: a
+    // symlink and its target are two entries here, and the content-based
+    // dedupe pass decides which name to keep. Canonicalising would collapse
+    // them early and keep whichever was reached first, which is usually the
+    // symlink rather than the real file.
+    if !seen.insert(path.to_path_buf()) {
         return Ok(());
     }
 
@@ -321,6 +330,18 @@ mod tests {
         );
         let r = collect(&[root.clone()], &WalkOptions::default()).unwrap();
         assert_eq!(names(&r, &root), vec!["a.rs"]);
+    }
+
+    /// A symlink pointing at a file is counted even without --follow-links,
+    /// which governs only descent into symlinked directories.
+    #[test]
+    fn symlinks_to_files_are_counted() {
+        let root = tree("link", &[("real.rs", "fn a(){}")]);
+        std::os::unix::fs::symlink(root.join("real.rs"), root.join("link.rs")).unwrap();
+        let r = collect(&[root.clone()], &WalkOptions::default()).unwrap();
+        // Both paths reach the same content, so one is kept as a duplicate
+        // only once dedupe runs; the walk itself sees both.
+        assert!(names(&r, &root).contains(&"link.rs".to_string()));
     }
 
     /// Zero-length files are skipped, not counted as empty ones.

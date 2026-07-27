@@ -29,25 +29,34 @@ pub fn strip_comments(text: &str, dialect: CommentDialect) -> String {
     }
 }
 
-/// Remove `start ... end` spans. Unterminated spans run to end of input,
-/// matching the greedy behaviour of the generated regexes.
+/// Remove `start ... end` spans.
+///
+/// An **unterminated** opener removes nothing: the generated regexes require
+/// a closing delimiter, so a lone `/*` simply fails to match and the rest of
+/// the file stays code. Truncating there instead would silently swallow
+/// everything after, say, a `text/*` inside a Python docstring.
 fn strip_block(text: &str, start: &str, end: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut pos = 0;
 
-    while let Some(open) = rest.find(start) {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + start.len()..];
-        match after.find(end) {
+    while let Some(open) = find_from(text, start, pos) {
+        let body = open + start.len();
+        match find_from(text, end, body) {
             Some(close) => {
-                // Newlines inside the comment are dropped along with it; the
-                // Perl substitution does the same, so line counts agree.
-                rest = &after[close + end.len()..];
+                out.push_str(&text[pos..open]);
+                // Newlines inside the comment go with it; the Perl
+                // substitution does the same, so line counts agree.
+                pos = close + end.len();
             }
-            None => return out,
+            None => {
+                // Keep the opener as ordinary text and carry on past it, so a
+                // later comment is still found.
+                out.push_str(&text[pos..body]);
+                pos = body;
+            }
         }
     }
-    out.push_str(rest);
+    out.push_str(&text[pos..]);
     out
 }
 
@@ -69,7 +78,13 @@ fn strip_c_style(text: &str, line_comments: bool) -> String {
                         i = close + 2;
                         continue;
                     }
-                    None => return out,
+                    // Unterminated: not a comment at all. Emit the opener and
+                    // keep scanning, so a later `//` is still recognised.
+                    None => {
+                        out.push_str("/*");
+                        i += 2;
+                        continue;
+                    }
                 }
             }
             if line_comments && bytes[i + 1] == b'/' {
@@ -97,22 +112,22 @@ fn strip_pascal(text: &str) -> String {
 
     while i < bytes.len() {
         if bytes[i] == b'{' {
-            match find_from(text, "}", i + 1) {
-                Some(close) => {
-                    i = close + 1;
-                    continue;
-                }
-                None => return out,
+            if let Some(close) = find_from(text, "}", i + 1) {
+                i = close + 1;
+                continue;
             }
+            out.push('{');
+            i += 1;
+            continue;
         }
         if bytes[i] == b'(' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            match find_from(text, "*)", i + 2) {
-                Some(close) => {
-                    i = close + 2;
-                    continue;
-                }
-                None => return out,
+            if let Some(close) = find_from(text, "*)", i + 2) {
+                i = close + 2;
+                continue;
             }
+            out.push_str("(*");
+            i += 2;
+            continue;
         }
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             i = end_of_line(bytes, i + 2);
@@ -135,18 +150,19 @@ fn strip_smalltalk(text: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'"' {
             let mut j = i + 1;
-            loop {
-                match find_from(text, "\"", j) {
-                    Some(close) => {
-                        if close + 1 < bytes.len() && bytes[close + 1] == b'"' {
-                            j = close + 2; // doubled quote: stay in the comment
-                            continue;
-                        }
-                        i = close + 1;
-                        break;
-                    }
-                    None => return out,
+            let mut closed = false;
+            while let Some(close) = find_from(text, "\"", j) {
+                if close + 1 < bytes.len() && bytes[close + 1] == b'"' {
+                    j = close + 2; // doubled quote: stay in the comment
+                    continue;
                 }
+                i = close + 1;
+                closed = true;
+                break;
+            }
+            if !closed {
+                out.push('"');
+                i += 1;
             }
             continue;
         }
@@ -165,13 +181,13 @@ fn strip_pl_sql(text: &str) -> String {
 
     while i < bytes.len() {
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            match find_from(text, "*/", i + 2) {
-                Some(close) => {
-                    i = close + 2;
-                    continue;
-                }
-                None => return out,
+            if let Some(close) = find_from(text, "*/", i + 2) {
+                i = close + 2;
+                continue;
             }
+            out.push_str("/*");
+            i += 2;
+            continue;
         }
         if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
             i = end_of_line(bytes, i + 2);
@@ -250,9 +266,21 @@ mod tests {
         );
     }
 
+    /// An unterminated opener is not a comment: Regexp::Common needs a
+    /// closing delimiter, so cloc leaves the rest of the file as code.
     #[test]
-    fn unterminated_block_runs_to_end() {
-        assert_eq!(strip_comments("a /* b\nc", CommentDialect::C), "a ");
+    fn unterminated_block_removes_nothing() {
+        assert_eq!(strip_comments("a /* b\nc", CommentDialect::C), "a /* b\nc");
+    }
+
+    /// A complete comment is still removed even when an unterminated opener
+    /// follows it, and a later line comment is still found.
+    #[test]
+    fn scanning_continues_past_an_unterminated_opener() {
+        assert_eq!(
+            strip_comments("a /* x */ b /* c\nd // e\n", CommentDialect::Cpp),
+            "a  b /* c\nd \n"
+        );
     }
 
     /// Matching cloc means matching its blind spot: comment markers inside
