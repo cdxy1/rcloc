@@ -7,11 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXE: &str = env!("CARGO_BIN_EXE_cloc-rs");
+const EXE: &str = env!("CARGO_BIN_EXE_rcloc");
 
 /// Build a tree of files in a fresh temporary directory.
 fn tree(tag: &str, files: &[(&str, &str)]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("cloc-rs-cli-{}-{tag}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rcloc-cli-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     for (name, content) in files {
         let path = root.join(name);
@@ -22,10 +22,10 @@ fn tree(tag: &str, files: &[(&str, &str)]) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> String {
-    let out = Command::new(EXE).args(args).output().expect("run cloc-rs");
+    let out = Command::new(EXE).args(args).output().expect("run rcloc");
     assert!(
         out.status.success(),
-        "cloc-rs {args:?} failed: {}",
+        "rcloc {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()

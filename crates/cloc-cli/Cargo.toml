@@ -7,7 +7,7 @@ license.workspace = true
 description = "Command line interface for cloc"
 
 [[bin]]
-name = "cloc-rs"
+name = "rcloc"
 path = "src/main.rs"
 
 [dependencies]

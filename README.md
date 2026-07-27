@@ -12,7 +12,7 @@
 [![No runtime](https://img.shields.io/badge/runtime_dependencies-none-22c55e.svg)](#install)
 
 ```console
-$ cloc-rs --hide-rate --thousands-delimiter=, crates
+$ rcloc --hide-rate --thousands-delimiter=, crates
 ◉ rcloc 0.1.0
   Fast source insights, powered by Rust
 
@@ -54,57 +54,55 @@ You need [Rust 1.75 or newer](https://www.rust-lang.org/tools/install).
 git clone https://github.com/cdxy1/rcloc.git
 cd rcloc
 cargo build --release
-./target/release/cloc-rs .
+./target/release/rcloc .
 ```
 
 To put the binary in Cargo's bin directory:
 
 ```bash
 cargo install --path crates/cloc-cli
-cloc-rs .
+rcloc .
 ```
-
-> The package currently installs as `cloc-rs`. The shorter `rcloc` name used in examples describes the project; you can create an alias if you prefer it: `alias rcloc=cloc-rs`.
 
 ## Usage
 
 Count the current project:
 
 ```bash
-cloc-rs .
+rcloc .
 ```
 
 See every file, not just language totals:
 
 ```bash
-cloc-rs --by-file src
+rcloc --by-file src
 ```
 
 Count only selected languages and format large numbers:
 
 ```bash
-cloc-rs --include-lang=Rust,TypeScript --thousands-delimiter=, .
+rcloc --include-lang=Rust,TypeScript --thousands-delimiter=, .
 ```
 
 Compare two source trees:
 
 ```bash
-cloc-rs --diff release-1.0 release-2.0
+rcloc --diff release-1.0 release-2.0
 ```
 
 Compare Git revisions:
 
 ```bash
-cloc-rs --git-diff-all v1.0.0 v2.0.0
+rcloc --git-diff-all v1.0.0 v2.0.0
 ```
 
 Use Git's tracked-file list so build artifacts and ignored files stay out:
 
 ```bash
-cloc-rs --vcs=git .
+rcloc --vcs=git .
 ```
 
-Run `cloc-rs --help` for the complete option reference.
+Run `rcloc --help` for the complete option reference.
 
 ## Output formats
 

@@ -64,7 +64,7 @@ fn header(name: &str) -> String {
     format!(
         "<html>\n<head>\n\
          <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n\
-         <meta name=\"GENERATOR\" content=\"cloc-rs\">\n\n\
+         <meta name=\"GENERATOR\" content=\"rcloc\">\n\n\
          <title>{}</title>\n\n\
          <style TYPE=\"text/css\">\n<!--\n\
          \x20   body {{\n        color: black;\n        background-color: white;\n\

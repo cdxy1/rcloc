@@ -1,4 +1,4 @@
-//! `cloc-rs` — count lines of code.
+//! `rcloc` — count lines of code.
 
 mod html;
 mod output;
@@ -26,7 +26,7 @@ use std::time::Instant;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "cloc-rs",
+    name = "rcloc",
     version,
     about = "Count blank lines, comment lines, and lines of source code"
 )]
@@ -282,7 +282,7 @@ struct Cli {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("cloc-rs: {e:#}");
+        eprintln!("rcloc: {e:#}");
         std::process::exit(1);
     }
 }
