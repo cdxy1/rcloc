@@ -1,5 +1,6 @@
 //! The cloc counting engine.
 
+pub mod archive;
 pub mod classify;
 pub mod counter;
 pub mod dedupe;

@@ -5,6 +5,7 @@ mod report;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use cloc_core::archive::{self, ArchiveOptions};
 use cloc_core::classify::{self, Classification, ClassifyOptions};
 use cloc_core::counter::{self, CountOptions};
 use cloc_core::dedupe;
@@ -141,6 +142,15 @@ struct Cli {
     /// Language to assume for files with no extension.
     #[arg(long = "lang-no-ext", alias = "lang_no_ext", value_name = "LANG")]
     lang_no_ext: Option<String>,
+    /// Unpack archives with this command; `>FILE<` stands for the archive.
+    #[arg(long = "extract-with", alias = "extract_with", value_name = "CMD")]
+    extract_with: Option<String>,
+    /// Skip input files whose name matches this regex before unpacking.
+    #[arg(long = "skip-archive", alias = "skip_archive", value_name = "REGEX")]
+    skip_archive: Option<String>,
+    /// Unpack archives here instead of a temporary directory.
+    #[arg(long, value_name = "DIR")]
+    sdir: Option<PathBuf>,
     /// Count files whose content duplicates another file.
     #[arg(long = "skip-uniqueness", alias = "skip_uniqueness")]
     skip_uniqueness: bool,
@@ -238,6 +248,24 @@ fn format_of(cli: &Cli) -> Format {
 }
 
 fn count(cli: &Cli, db: &'static LangDb) -> Result<Report> {
+    // --skip-archive drops matching inputs before anything is unpacked.
+    let mut inputs = cli.inputs.clone();
+    if let Some(pattern) = &cli.skip_archive {
+        let re = cloc_core::regex_cache::cached(&format!("(?:{pattern})$"))?;
+        inputs.retain(|p| !re.is_match(&p.to_string_lossy()).unwrap_or(false));
+    }
+
+    // An archive is replaced by the directory it unpacks to. The guard owns
+    // the temporary directories, so it has to outlive the counting below.
+    let (inputs, _extraction) = archive::expand_inputs(
+        &inputs,
+        db,
+        &ArchiveOptions {
+            extract_with: cli.extract_with.clone(),
+            sdir: cli.sdir.clone(),
+        },
+    )?;
+
     let walk_opts = WalkOptions {
         exclude_dirs: split_list(&cli.exclude_dir),
         match_f: cli.match_f.clone(),
@@ -252,7 +280,7 @@ fn count(cli: &Cli, db: &'static LangDb) -> Result<Report> {
         max_file_size_mb: cli.max_file_size,
         skip_hidden: cli.skip_hidden,
     };
-    let found = walk::collect(&cli.inputs, &walk_opts)?;
+    let found = walk::collect(&inputs, &walk_opts)?;
 
     let classify_opts = ClassifyOptions {
         autoconf: cli.autoconf,

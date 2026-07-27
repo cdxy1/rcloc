@@ -169,6 +169,13 @@ impl LangDb {
         self.known_binary_archives.contains(ext)
     }
 
+    /// Archive extensions, used when hunting for archives *nested* inside an
+    /// already-extracted tree. Deliberately a different set from the one that
+    /// decides whether a command-line argument is an archive.
+    pub fn binary_archive_extensions(&self) -> &BTreeSet<String> {
+        &self.known_binary_archives
+    }
+
     pub fn eol_continuation(&self, language: &str) -> Option<&str> {
         self.eol_continuation_re.get(language).map(String::as_str)
     }
