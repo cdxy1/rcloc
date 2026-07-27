@@ -100,13 +100,19 @@ impl LangDb {
 
         let script_languages = raw.language_by_script.values().cloned().collect();
 
+        // An extension that names a language is never "not code", even when
+        // both tables list it. The original prunes the overlap at startup, so
+        // `csv` counts as CSV rather than being skipped as data.
+        let mut not_code_extension = raw.not_code_extension;
+        not_code_extension.retain(|ext| !raw.language_by_extension.contains_key(ext));
+
         Ok(Self {
             language_by_extension: raw.language_by_extension,
             language_by_script: raw.language_by_script,
             language_by_file_type: raw.language_by_file_type,
             language_by_prefix: raw.language_by_prefix,
             filters_by_language,
-            not_code_extension: raw.not_code_extension,
+            not_code_extension,
             not_code_filename: raw.not_code_filename,
             scale_factor: raw.scale_factor,
             known_binary_archives: raw.known_binary_archives,
@@ -221,7 +227,9 @@ mod tests {
         assert_eq!(db.extensions().len(), 1012);
         assert_eq!(db.languages().len(), 422);
         assert_eq!(db.extension_collision.len(), 22);
-        assert_eq!(db.not_code_extension.len(), 66);
+        // Extensions that also name a language are pruned from the
+        // not-code set, so this is below the 66 the Perl table lists.
+        assert_eq!(db.not_code_extension.len(), 64);
         assert_eq!(db.not_code_filename.len(), 23);
         assert_eq!(db.known_binary_archives.len(), 11);
         assert_eq!(db.eol_continuation_re.len(), 70);
@@ -262,6 +270,17 @@ mod tests {
             rbr,
             Filter::ReplaceBetweenRegex { multiline: true, .. }
         ));
+    }
+
+    /// `csv` appears in both tables; naming a language must win, or CSV
+    /// files are skipped as data.
+    #[test]
+    fn an_extension_that_names_a_language_is_code() {
+        let db = LangDb::default_db();
+        assert_eq!(db.language_for_extension("csv"), Some("CSV"));
+        assert!(!db.is_not_code_extension("csv"));
+        // Something that only appears in the not-code table is unaffected.
+        assert!(db.is_not_code_extension("jpg"));
     }
 
     /// An ambiguous extension resolves to its pseudo-language, which the

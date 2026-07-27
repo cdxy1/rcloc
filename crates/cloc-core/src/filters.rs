@@ -345,17 +345,36 @@ fn expand_tabs(line: &str) -> String {
     out
 }
 
-/// Perl's `$1`, with its exact update rules — which several filters depend on
-/// without saying so.
+/// What a filter loop does with a line, and — just as importantly — how it
+/// got there.
 ///
-/// A **successful** match resets every capture variable: groups the pattern
-/// does not have become undefined. A **failed** match leaves them untouched,
-/// so `$1` can outlive the match that set it and be read on a later line.
+/// Perl restores the capture variables when `next` unwinds the loop body, but
+/// not when the body simply runs to its end. So the way an iteration finishes
+/// decides whether `$1` is still visible on the following line, and the three
+/// endings have to be distinguished.
+enum Step {
+    /// `next` — drop the line.
+    Skip,
+    /// `push ...; next;` — keep the line, but `$1` does not survive.
+    KeepAndNext(String),
+    /// The push at the bottom of the body: `$1` carries to the next line.
+    Keep(String),
+}
+
+/// Perl's `$1`, with the update rules several filters depend on without
+/// saying so.
 ///
-/// Getting this wrong is not academic. In Lua's `--[[ ... ]]` chain, the line
-/// after a block comment is judged against `$1`; treat the group-less `]]`
-/// match as leaving `$1` alone and that line is silently dropped from the
-/// code count.
+/// * A **successful** match resets every capture variable, so a pattern with
+///   no groups leaves `$1` undefined.
+/// * A **failed** match leaves it untouched, so `$1` can outlive the match
+///   that set it and be read on a later line.
+/// * `next` restores it to what it was before the loop body was entered,
+///   which is to say undefined.
+///
+/// None of this is academic. Get the second rule wrong and the line after
+/// every Lua block comment vanishes from the code count; get the third wrong
+/// and a comment opened mid-line makes every following line of the comment
+/// report the code that preceded it.
 #[derive(Default)]
 struct LastGroup1(Option<String>);
 
@@ -422,50 +441,74 @@ fn remove_between(lines: Vec<String>, start: &Marker<'_>, end: &Marker<'_>) -> R
     let mut g1 = LastGroup1::default();
 
     for line in lines {
-        if is_blank(&line) {
-            continue;
-        }
-        // `s/start.*?end//g` — group-less, so it clears $1 if it fired.
-        let (mut line, stripped) = strip_inline_pairs(&line, start, end)?;
-        g1.after_groupless(stripped);
-        if is_blank(&line) {
-            continue;
-        }
-
-        if in_comment {
-            // `if (/end/)` then `s/^.*?end//` — both group-less.
-            if let Some((_, e)) = end.find(&line)? {
-                g1.clear();
-                line = line[e..].to_string();
-                in_comment = false;
-            }
-            if in_comment {
-                continue;
-            }
-        }
-        if is_blank(&line) {
-            continue;
-        }
-
-        // `$in_comment = 1 if /^(.*?)start/` — the capture is the text before
-        // the marker, and it survives if this fails to match.
-        if let Some((s, _)) = start.find(&line)? {
-            in_comment = true;
-            g1.set(&line[..s]);
-        }
-        if g1.is_defined_and_blank() {
-            continue;
-        }
-        if in_comment {
-            if let Some((s, _)) = start.find(&line)? {
-                let kept = line[..s].to_string();
-                g1.set(&kept);
-                line = kept;
-            }
-        }
-        out.push(line);
+        let step = remove_between_line(line, start, end, &mut in_comment, &mut g1)?;
+        finish(step, &mut out, &mut g1);
     }
     Ok(out)
+}
+
+/// One iteration of the loop above, so that how it ends is explicit.
+fn remove_between_line(
+    line: String,
+    start: &Marker<'_>,
+    end: &Marker<'_>,
+    in_comment: &mut bool,
+    g1: &mut LastGroup1,
+) -> Result<Step> {
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    // `s/start.*?end//g` — group-less, so it clears $1 if it fired.
+    let (mut line, stripped) = strip_inline_pairs(&line, start, end)?;
+    g1.after_groupless(stripped);
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+
+    if *in_comment {
+        // `if (/end/)` then `s/^.*?end//` — both group-less.
+        if let Some((_, e)) = end.find(&line)? {
+            g1.clear();
+            line = line[e..].to_string();
+            *in_comment = false;
+        }
+        if *in_comment {
+            return Ok(Step::Skip);
+        }
+    }
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+
+    // `$in_comment = 1 if /^(.*?)start/` — the capture is the text before the
+    // marker, and it survives if this fails to match.
+    if let Some((s, _)) = start.find(&line)? {
+        *in_comment = true;
+        g1.set(&line[..s]);
+    }
+    if g1.is_defined_and_blank() {
+        return Ok(Step::Skip);
+    }
+    if *in_comment {
+        if let Some((s, _)) = start.find(&line)? {
+            let kept = line[..s].to_string();
+            g1.set(&kept);
+            line = kept;
+        }
+    }
+    Ok(Step::Keep(line))
+}
+
+/// Apply a [`Step`], honouring Perl's rule that `next` discards `$1`.
+fn finish(step: Step, out: &mut Vec<String>, g1: &mut LastGroup1) {
+    match step {
+        Step::Skip => g1.clear(),
+        Step::KeepAndNext(line) => {
+            out.push(line);
+            g1.clear();
+        }
+        Step::Keep(line) => out.push(line),
+    }
 }
 
 /// `s/start.*?end//g`: remove every start..end pair that both opens and
@@ -508,58 +551,79 @@ fn replace_between_regex(
     let mut g1 = LastGroup1::default();
 
     for line in lines {
-        if is_blank(&line) {
-            continue;
-        }
-        let (mut line, replaced) = replace_inline_pairs(&line, start, end, replacement)?;
-        g1.after_groupless(replaced);
-        if is_blank(&line) {
-            continue;
-        }
-
-        if in_comment {
-            if let Some(m) = end.find(&line)? {
-                let caps = end.captures(&line)?;
-                let repl = caps
-                    .as_ref()
-                    .map(|c| eval_replacement(replacement, c))
-                    .unwrap_or_else(|| unquote(replacement).to_string());
-                // The end pattern may itself capture; either way this match
-                // succeeded, so $1 takes its value from this pattern.
-                match caps.as_ref().and_then(|c| c.get(1)) {
-                    Some(g) => g1.set(g.as_str()),
-                    None => g1.clear(),
-                }
-                line = format!("{repl}{}", &line[m.end()..]);
-                in_comment = false;
-            }
-            if in_comment {
-                continue;
-            }
-        }
-        if is_blank(&line) {
-            continue;
-        }
-
-        if multiline {
-            if let Some(m) = start.find(&line)? {
-                in_comment = true;
-                g1.set(&line[..m.start()]);
-            }
-        }
-        if g1.is_defined_and_blank() {
-            continue;
-        }
-        if in_comment {
-            if let Some(m) = start.find(&line)? {
-                let kept = line[..m.start()].to_string();
-                g1.set(&kept);
-                line = kept;
-            }
-        }
-        out.push(line);
+        let step = replace_between_line(
+            line,
+            start,
+            end,
+            replacement,
+            multiline,
+            &mut in_comment,
+            &mut g1,
+        )?;
+        finish(step, &mut out, &mut g1);
     }
     Ok(out)
+}
+
+fn replace_between_line(
+    line: String,
+    start: &Regex,
+    end: &Regex,
+    replacement: &str,
+    multiline: bool,
+    in_comment: &mut bool,
+    g1: &mut LastGroup1,
+) -> Result<Step> {
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    let (mut line, replaced) = replace_inline_pairs(&line, start, end, replacement)?;
+    g1.after_groupless(replaced);
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+
+    if *in_comment {
+        if let Some(m) = end.find(&line)? {
+            let caps = end.captures(&line)?;
+            let repl = caps
+                .as_ref()
+                .map(|c| eval_replacement(replacement, c))
+                .unwrap_or_else(|| unquote(replacement).to_string());
+            // The end pattern may itself capture; either way this match
+            // succeeded, so $1 takes its value from this pattern.
+            match caps.as_ref().and_then(|c| c.get(1)) {
+                Some(g) => g1.set(g.as_str()),
+                None => g1.clear(),
+            }
+            line = format!("{repl}{}", &line[m.end()..]);
+            *in_comment = false;
+        }
+        if *in_comment {
+            return Ok(Step::Skip);
+        }
+    }
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+
+    if multiline {
+        if let Some(m) = start.find(&line)? {
+            *in_comment = true;
+            g1.set(&line[..m.start()]);
+        }
+    }
+    if g1.is_defined_and_blank() {
+        return Ok(Step::Skip);
+    }
+    if *in_comment {
+        if let Some(m) = start.find(&line)? {
+            let kept = line[..m.start()].to_string();
+            g1.set(&kept);
+            line = kept;
+        }
+    }
+    Ok(Step::Keep(line))
 }
 
 fn replace_inline_pairs(
@@ -635,42 +699,54 @@ fn remove_html_comments(lines: Vec<String>) -> Result<Vec<String>> {
     let mut g1 = LastGroup1::default();
 
     for line in lines {
-        if is_blank(&line) {
-            continue;
-        }
-        let (mut line, stripped) = strip_inline_pairs(&line, &open, &close)?;
-        g1.after_groupless(stripped);
-        if is_blank(&line) {
-            continue;
-        }
-        if in_comment {
-            if let Some((_, e)) = close.find(&line)? {
-                g1.clear();
-                line = line[e..].to_string();
-                in_comment = false;
-            }
-            // Unlike the other members of this family there is no early
-            // `next` here; the flag is re-tested further down.
-        }
-        if is_blank(&line) {
-            continue;
-        }
-        if let Some((s, _)) = open.find(&line)? {
-            in_comment = true;
-            g1.set(&line[..s]);
-        }
-        if let Some(kept) = g1.get() {
-            if !is_blank(kept) {
-                out.push(kept.to_string());
-                continue;
-            }
-        }
-        if in_comment {
-            continue;
-        }
-        out.push(line);
+        let step = html_comment_line(line, &open, &close, &mut in_comment, &mut g1)?;
+        finish(step, &mut out, &mut g1);
     }
     Ok(out)
+}
+
+fn html_comment_line(
+    line: String,
+    open: &Marker<'_>,
+    close: &Marker<'_>,
+    in_comment: &mut bool,
+    g1: &mut LastGroup1,
+) -> Result<Step> {
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    let (mut line, stripped) = strip_inline_pairs(&line, open, close)?;
+    g1.after_groupless(stripped);
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    if *in_comment {
+        if let Some((_, e)) = close.find(&line)? {
+            g1.clear();
+            line = line[e..].to_string();
+            *in_comment = false;
+        }
+        // Unlike the other members of this family there is no early `next`
+        // here; the flag is re-tested further down.
+    }
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    if let Some((s, _)) = open.find(&line)? {
+        *in_comment = true;
+        g1.set(&line[..s]);
+    }
+    // A line that is part code, part comment yields its code half as a line
+    // of its own -- and, ending in `next`, does not pass $1 along.
+    if let Some(kept) = g1.get() {
+        if !is_blank(kept) {
+            return Ok(Step::KeepAndNext(kept.to_string()));
+        }
+    }
+    if *in_comment {
+        return Ok(Step::Skip);
+    }
+    Ok(Step::Keep(line))
 }
 
 /// `<%-- ... --%>`
@@ -681,37 +757,48 @@ fn remove_jsp_comments(lines: Vec<String>) -> Result<Vec<String>> {
     let mut g1 = LastGroup1::default();
 
     for line in lines {
-        if is_blank(&line) {
-            continue;
-        }
-        let (mut line, stripped) = strip_inline_pairs(&line, &open, &close)?;
-        g1.after_groupless(stripped);
-        if is_blank(&line) {
-            continue;
-        }
-        if in_comment {
-            if let Some((_, e)) = close.find(&line)? {
-                g1.clear();
-                line = line[e..].to_string();
-                in_comment = false;
-            }
-        }
-        if is_blank(&line) {
-            continue;
-        }
-        if let Some((s, _)) = open.find(&line)? {
-            in_comment = true;
-            g1.set(&line[..s]);
-        }
-        if g1.is_defined_and_blank() {
-            continue;
-        }
-        if in_comment {
-            continue;
-        }
-        out.push(line);
+        let step = jsp_comment_line(line, &open, &close, &mut in_comment, &mut g1)?;
+        finish(step, &mut out, &mut g1);
     }
     Ok(out)
+}
+
+fn jsp_comment_line(
+    line: String,
+    open: &Marker<'_>,
+    close: &Marker<'_>,
+    in_comment: &mut bool,
+    g1: &mut LastGroup1,
+) -> Result<Step> {
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    let (mut line, stripped) = strip_inline_pairs(&line, open, close)?;
+    g1.after_groupless(stripped);
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    if *in_comment {
+        if let Some((_, e)) = close.find(&line)? {
+            g1.clear();
+            line = line[e..].to_string();
+            *in_comment = false;
+        }
+    }
+    if is_blank(&line) {
+        return Ok(Step::Skip);
+    }
+    if let Some((s, _)) = open.find(&line)? {
+        *in_comment = true;
+        g1.set(&line[..s]);
+    }
+    if g1.is_defined_and_blank() {
+        return Ok(Step::Skip);
+    }
+    if *in_comment {
+        return Ok(Step::Skip);
+    }
+    Ok(Step::Keep(line))
 }
 
 // --- Regexp::Common bridge ----------------------------------------------- {{{1
