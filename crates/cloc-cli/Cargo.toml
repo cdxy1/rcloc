@@ -1,0 +1,7 @@
+[package]
+name = "cloc-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cloc-core.workspace = true
