@@ -454,14 +454,25 @@ fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
         max_file_size_mb: cli.max_file_size,
         skip_hidden: cli.skip_hidden,
     };
-    let left_files = walk::collect(std::slice::from_ref(left), &walk_opts)?.files;
-    let right_files = walk::collect(std::slice::from_ref(right), &walk_opts)?.files;
+    let classify_opts = classify_options(cli);
+    // Each side is de-duplicated on its own, exactly as a plain count would
+    // be; without it a tree holding two copies of a file reports both.
+    let dedupe_side = |root: &PathBuf| -> Result<Vec<PathBuf>> {
+        let found = walk::collect(std::slice::from_ref(root), &walk_opts)?.files;
+        Ok(if cli.skip_uniqueness {
+            found
+        } else {
+            dedupe::remove_duplicates(found, db, &classify_opts).unique
+        })
+    };
+    let left_files = dedupe_side(left)?;
+    let right_files = dedupe_side(right)?;
 
     let opts = DiffOptions {
         count: count_options(cli)?,
         ignore_whitespace: cli.ignore_whitespace,
         ignore_case: cli.ignore_case,
-        classify: classify_options(cli),
+        classify: classify_opts,
     };
     let report = diffmode::compare(left, &left_files, right, &right_files, db, &opts)?;
 

@@ -5,11 +5,11 @@
 //! modified, added and removed. A file present on only one side contributes
 //! all of its lines to added or removed.
 //!
-//! Pairing is by relative path only. The original additionally tries to match
-//! files across trees whose layouts differ, by basename and by longest common
-//! parent directory, so comparing two unrelated trees finds pairs this does
-//! not. For the usual case -- two revisions of the same tree -- the two agree.
+//! Pairing is delegated to [`crate::align`], which strips the leading
+//! directories before matching so that two releases of the same project line
+//! up despite their directory names differing.
 
+use crate::align;
 use crate::classify::{self, Classification, ClassifyOptions};
 use crate::counter::CountOptions;
 use crate::diff::Delta;
@@ -66,42 +66,29 @@ pub struct DiffOptions {
 
 /// Pair up the files of two trees and diff each pair.
 pub fn compare(
-    left_root: &Path,
+    _left_root: &Path,
     left_files: &[PathBuf],
-    right_root: &Path,
+    _right_root: &Path,
     right_files: &[PathBuf],
     db: &LangDb,
     opts: &DiffOptions,
 ) -> Result<DiffReport> {
-    let left: BTreeMap<PathBuf, PathBuf> = left_files
-        .iter()
-        .map(|p| (relative(p, left_root), p.clone()))
-        .collect();
-    let right: BTreeMap<PathBuf, PathBuf> = right_files
-        .iter()
-        .map(|p| (relative(p, right_root), p.clone()))
-        .collect();
-
+    let alignment = align::align(left_files, right_files);
     let mut report = DiffReport::default();
 
-    let mut keys: Vec<&PathBuf> = left.keys().chain(right.keys()).collect();
-    keys.sort();
-    keys.dedup();
-
-    for key in keys {
-        match (left.get(key), right.get(key)) {
-            (Some(l), Some(r)) => compare_pair(l, r, key, db, opts, &mut report)?,
-            (Some(l), None) => one_sided(l, key, db, opts, false, &mut report)?,
-            (None, Some(r)) => one_sided(r, key, db, opts, true, &mut report)?,
-            (None, None) => unreachable!("key came from one of the two maps"),
-        }
+    for (left, right) in &alignment.pairs {
+        compare_pair(left, right, left, db, opts, &mut report)?;
+    }
+    for path in &alignment.removed {
+        one_sided(path, path, db, opts, false, &mut report)?;
+    }
+    for path in &alignment.added {
+        one_sided(path, path, db, opts, true, &mut report)?;
     }
 
+    report.by_file.sort_by(|a, b| a.0.cmp(&b.0));
+    report.alignment.sort();
     Ok(report)
-}
-
-fn relative(path: &Path, root: &Path) -> PathBuf {
-    path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
 
 /// A file on only one side: every line is added, or every line removed.
