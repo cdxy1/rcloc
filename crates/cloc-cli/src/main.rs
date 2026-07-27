@@ -9,6 +9,7 @@ use clap::Parser;
 use cloc_core::archive::{self, ArchiveOptions};
 use cloc_core::classify::{self, Classification, ClassifyOptions};
 use cloc_core::counter::{self, CountOptions};
+use cloc_core::diffmode::{self, DiffOptions};
 use cloc_core::dedupe;
 use cloc_core::filters::FilterOptions;
 use cloc_core::vcs;
@@ -171,6 +172,18 @@ struct Cli {
     /// Language to assume for files with no extension.
     #[arg(long = "lang-no-ext", alias = "lang_no_ext", value_name = "LANG")]
     lang_no_ext: Option<String>,
+    /// Compare two trees and report what changed between them.
+    #[arg(long)]
+    diff: bool,
+    /// Write the file pairing used by --diff to this file.
+    #[arg(long = "diff-alignment", alias = "diff_alignment", value_name = "FILE")]
+    diff_alignment: Option<PathBuf>,
+    /// Compare with all whitespace removed.
+    #[arg(long = "ignore-whitespace", alias = "ignore_whitespace")]
+    ignore_whitespace: bool,
+    /// Compare case-insensitively.
+    #[arg(long = "ignore-case", alias = "ignore_case")]
+    ignore_case: bool,
     /// Take the list of files and directories from FILE, one per line.
     #[arg(long = "list-file", alias = "list_file", value_name = "FILE")]
     list_file: Option<PathBuf>,
@@ -275,6 +288,11 @@ fn run() -> Result<()> {
             .num_threads(cli.processes)
             .build_global()
             .context("configuring the thread pool")?;
+    }
+
+    // --diff-alignment implies --diff, as it has nothing to align otherwise.
+    if cli.diff || cli.diff_alignment.is_some() {
+        return run_diff(&cli, db);
     }
 
     let started = Instant::now();
@@ -412,6 +430,80 @@ fn now_timestamp() -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
 }
 
+/// `--diff`: compare exactly two inputs.
+fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
+    if cli.inputs.len() != 2 {
+        bail!(
+            "--diff compares exactly two files or directories, got {}",
+            cli.inputs.len()
+        );
+    }
+    let (left, right) = (&cli.inputs[0], &cli.inputs[1]);
+
+    let walk_opts = WalkOptions {
+        exclude_dirs: split_list(&cli.exclude_dir),
+        match_f: cli.match_f.clone(),
+        not_match_f: cli.not_match_f.clone(),
+        match_d: cli.match_d.clone(),
+        not_match_d: cli.not_match_d.clone(),
+        fullpath: cli.fullpath,
+        exclude_ext: split_list(&cli.exclude_ext),
+        no_recurse: cli.no_recurse,
+        follow_links: cli.follow_links,
+        read_binary_files: cli.read_binary_files,
+        max_file_size_mb: cli.max_file_size,
+        skip_hidden: cli.skip_hidden,
+    };
+    let left_files = walk::collect(std::slice::from_ref(left), &walk_opts)?.files;
+    let right_files = walk::collect(std::slice::from_ref(right), &walk_opts)?.files;
+
+    let opts = DiffOptions {
+        count: count_options(cli)?,
+        ignore_whitespace: cli.ignore_whitespace,
+        ignore_case: cli.ignore_case,
+        classify: classify_options(cli),
+    };
+    let report = diffmode::compare(left, &left_files, right, &right_files, db, &opts)?;
+
+    if let Some(path) = &cli.diff_alignment {
+        let mut text = report.alignment.join("\n");
+        text.push('\n');
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    let rendered = output::render_diff(&report, format_of(cli), &output_options(cli)?);
+    match &cli.report_file {
+        Some(path) => {
+            std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))?
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+fn classify_options(cli: &Cli) -> ClassifyOptions {
+    ClassifyOptions {
+        autoconf: cli.autoconf,
+        ignore_case_ext: cli.ignore_case_ext,
+        lang_no_ext: cli.lang_no_ext.clone(),
+        forced_extensions: vec![],
+        no_autogen: cli.no_autogen,
+    }
+}
+
+fn count_options(cli: &Cli) -> Result<CountOptions> {
+    Ok(CountOptions {
+        filters: FilterOptions {
+            strip_str_comments: cli.strip_str_comments,
+            inline: cli.inline,
+            docstring_as_code: cli.docstring_as_code,
+            no_autogen: cli.no_autogen,
+        },
+        skip_leading: parse_skip_leading(&cli.skip_leading)?,
+        ignore_regex: cli.ignore_regex.clone(),
+    })
+}
+
 fn output_options(cli: &Cli) -> Result<OutputOptions> {
     // --percent is spelled out as --by-percent t.
     let by_percent = match (&cli.by_percent, cli.percent) {
@@ -528,23 +620,8 @@ fn count(cli: &Cli, db: &LangDb) -> Result<Report> {
         None => walk::collect(&inputs, &walk_opts)?,
     };
 
-    let classify_opts = ClassifyOptions {
-        autoconf: cli.autoconf,
-        ignore_case_ext: cli.ignore_case_ext,
-        lang_no_ext: cli.lang_no_ext.clone(),
-        forced_extensions: vec![],
-        no_autogen: cli.no_autogen,
-    };
-    let count_opts = CountOptions {
-        filters: FilterOptions {
-            strip_str_comments: cli.strip_str_comments,
-            inline: cli.inline,
-            docstring_as_code: cli.docstring_as_code,
-            no_autogen: cli.no_autogen,
-        },
-        skip_leading: parse_skip_leading(&cli.skip_leading)?,
-        ignore_regex: cli.ignore_regex.clone(),
-    };
+    let classify_opts = classify_options(cli);
+    let count_opts = count_options(cli)?;
 
     // cloc drops files whose content already appeared elsewhere; a tree of
     // Python packages is full of identical __init__.py files.

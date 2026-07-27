@@ -20,9 +20,11 @@ numbers may not.
 ## Status
 
 Counting works end to end and agrees with the original on the corpora below.
-Not yet built: `--diff` and its relatives, `--sql` and `--html` output, and
-the percentage and formatting options (`--by-percent`, `--sum-one`, `--fmt`,
-`--summary-cutoff`, `--xsl`).
+`--diff` compares two trees and its counts match, but it pairs files by
+relative path only, where the original also matches files across trees whose
+layouts differ. Not yet built: `--html` and `--xsl` output, `--count-and-diff`,
+`--diff-list-file`, and the git-revision forms of diff (`--git-diff-rel`,
+`--git-diff-all`).
 
 | Corpus | Files | Mismatches |
 | --- | ---: | ---: |

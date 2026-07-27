@@ -691,3 +691,206 @@ mod tests {
         assert_eq!(number(1000, &opts), "1,000");
     }
 }
+
+// --- diff reports --------------------------------------------------------- {{{1
+
+use cloc_core::diff::Delta;
+use cloc_core::diffmode::DiffReport;
+
+/// Render a `--diff` report.
+///
+/// Every format shows the same four dispositions -- same, modified, added,
+/// removed -- as four blocks, because a diff has no single number to put in a
+/// column the way a plain count does.
+pub fn render_diff(report: &DiffReport, format: Format, opts: &OutputOptions) -> String {
+    match format {
+        Format::Json => diff_json(report, opts),
+        Format::Csv => diff_csv(report, opts),
+        _ => diff_text(report, opts),
+    }
+}
+
+/// The four dispositions, in the order cloc prints them.
+const DISPOSITIONS: [&str; 4] = ["same", "modified", "added", "removed"];
+
+
+fn pick(delta: Delta, which: &str) -> usize {
+    match which {
+        "same" => delta.same,
+        "modified" => delta.modified,
+        "added" => delta.added,
+        _ => delta.removed,
+    }
+}
+
+fn diff_text(report: &DiffReport, opts: &OutputOptions) -> String {
+    let width = report
+        .by_language
+        .keys()
+        .map(|l| l.chars().count())
+        .chain(std::iter::once("Language".len()))
+        .max()
+        .unwrap_or(20)
+        .max(20);
+    let rule = "-".repeat(width + 9 + 14 * 3);
+
+    let mut out = String::new();
+    if !opts.quiet {
+        out.push_str(&format!("{URL} v {VERSION}\n"));
+    }
+    out.push_str(&rule);
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "{:<width$}{:>9}{:>14}{:>14}{:>14}",
+        "Language", "files", "blank", "comment", "code"
+    );
+    out.push_str(&rule);
+    out.push('\n');
+
+    // A language heads its own block and the four dispositions sit under it,
+    // which reads better than four tables each listing every language.
+    let mut totals: [(usize, usize, usize, usize); 4] = Default::default();
+
+    for (language, d) in &report.by_language {
+        let _ = writeln!(out, "{language}");
+        for (n, which) in DISPOSITIONS.iter().enumerate() {
+            let row = (
+                pick(d.files, which),
+                pick(d.delta.blank, which),
+                pick(d.delta.comment, which),
+                pick(d.delta.code, which),
+            );
+            let _ = writeln!(
+                out,
+                " {:<w$}{:>9}{:>14}{:>14}{:>14}",
+                which,
+                number(row.0, opts),
+                number(row.1, opts),
+                number(row.2, opts),
+                number(row.3, opts),
+                w = width - 1
+            );
+            totals[n].0 += row.0;
+            totals[n].1 += row.1;
+            totals[n].2 += row.2;
+            totals[n].3 += row.3;
+        }
+    }
+
+    out.push_str(&rule);
+    out.push('\n');
+    let _ = writeln!(out, "SUM:");
+    for (n, which) in DISPOSITIONS.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            " {:<w$}{:>9}{:>14}{:>14}{:>14}",
+            which,
+            number(totals[n].0, opts),
+            number(totals[n].1, opts),
+            number(totals[n].2, opts),
+            number(totals[n].3, opts),
+            w = width - 1
+        );
+    }
+    out.push_str(&rule);
+    out.push('\n');
+    out
+}
+
+fn diff_json(report: &DiffReport, opts: &OutputOptions) -> String {
+    let mut out = String::from("{\n");
+    let mut blocks: Vec<String> = Vec::new();
+
+    for which in DISPOSITIONS {
+        let mut rows: Vec<String> = Vec::new();
+        let mut totals = (0usize, 0usize, 0usize, 0usize);
+
+        if opts.by_file {
+            for (path, _language, delta) in &report.by_file {
+                let row = (
+                    0,
+                    pick(delta.blank, which),
+                    pick(delta.comment, which),
+                    pick(delta.code, which),
+                );
+                if row.1 == 0 && row.2 == 0 && row.3 == 0 {
+                    continue;
+                }
+                rows.push(format!(
+                    "      {} : {{\n        \"blank\" : {},\n        \"comment\" : {},\n        \"code\" : {}\n      }}",
+                    json_string(&path.to_string_lossy()),
+                    row.1,
+                    row.2,
+                    row.3
+                ));
+                totals.1 += row.1;
+                totals.2 += row.2;
+                totals.3 += row.3;
+            }
+        } else {
+            for (language, d) in &report.by_language {
+                let row = (
+                    pick(d.files, which),
+                    pick(d.delta.blank, which),
+                    pick(d.delta.comment, which),
+                    pick(d.delta.code, which),
+                );
+                if row == (0, 0, 0, 0) {
+                    continue;
+                }
+                rows.push(format!(
+                    "      {} : {{\n        \"nFiles\" : {},\n        \"blank\" : {},\n        \"comment\" : {},\n        \"code\" : {}\n      }}",
+                    json_string(language),
+                    row.0,
+                    row.1,
+                    row.2,
+                    row.3
+                ));
+                totals.0 += row.0;
+                totals.1 += row.1;
+                totals.2 += row.2;
+                totals.3 += row.3;
+            }
+        }
+
+        rows.push(format!(
+            "      \"SUM\" : {{\n        \"nFiles\" : {},\n        \"blank\" : {},\n        \"comment\" : {},\n        \"code\" : {}\n      }}",
+            totals.0, totals.1, totals.2, totals.3
+        ));
+        blocks.push(format!("  \"{which}\" : {{\n{}\n  }}", rows.join(",\n")));
+    }
+
+    out.push_str(&blocks.join(",\n"));
+    out.push_str("\n}\n");
+    out
+}
+
+fn diff_csv(report: &DiffReport, opts: &OutputOptions) -> String {
+    let d = opts.csv_delimiter.as_deref().unwrap_or(",");
+    let mut out = String::new();
+    let _ = writeln!(out, "disposition{d}language{d}files{d}blank{d}comment{d}code");
+    for which in DISPOSITIONS {
+        for (language, counts) in &report.by_language {
+            let row = (
+                pick(counts.files, which),
+                pick(counts.delta.blank, which),
+                pick(counts.delta.comment, which),
+                pick(counts.delta.code, which),
+            );
+            if row == (0, 0, 0, 0) {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "{which}{d}{}{d}{}{d}{}{d}{}{d}{}",
+                csv_field(language, d),
+                row.0,
+                row.1,
+                row.2,
+                row.3
+            );
+        }
+    }
+    out
+}

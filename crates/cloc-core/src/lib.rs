@@ -5,6 +5,8 @@ pub mod classify;
 pub mod counter;
 pub mod dedupe;
 pub mod dialects;
+pub mod diff;
+pub mod diffmode;
 pub mod filters;
 pub mod io;
 pub mod regex_cache;
