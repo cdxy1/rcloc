@@ -9,6 +9,7 @@ pub mod dialects;
 pub mod diff;
 pub mod diffmode;
 pub mod filters;
+pub mod git;
 pub mod io;
 pub mod regex_cache;
 pub mod vcs;

@@ -10,6 +10,7 @@ use cloc_core::archive::{self, ArchiveOptions};
 use cloc_core::classify::{self, Classification, ClassifyOptions};
 use cloc_core::counter::{self, CountOptions};
 use cloc_core::diffmode::{self, DiffOptions};
+use cloc_core::git;
 use cloc_core::dedupe;
 use cloc_core::filters::FilterOptions;
 use cloc_core::vcs;
@@ -19,10 +20,10 @@ use output::{Format, OutputOptions};
 use rayon::prelude::*;
 use report::{FileEntry, Report};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "cloc-rs",
     version,
@@ -175,6 +176,18 @@ struct Cli {
     /// Compare two trees and report what changed between them.
     #[arg(long)]
     diff: bool,
+    /// Count each input separately, then diff them.
+    #[arg(long = "count-and-diff", alias = "count_and_diff")]
+    count_and_diff: bool,
+    /// Read inputs as git revisions rather than paths.
+    #[arg(long)]
+    git: bool,
+    /// Diff two git revisions, comparing only the files that changed.
+    #[arg(long = "git-diff-rel", alias = "git_diff_rel")]
+    git_diff_rel: bool,
+    /// Diff two git revisions, comparing every file.
+    #[arg(long = "git-diff-all", alias = "git_diff_all")]
+    git_diff_all: bool,
     /// Write the file pairing used by --diff to this file.
     #[arg(long = "diff-alignment", alias = "diff_alignment", value_name = "FILE")]
     diff_alignment: Option<PathBuf>,
@@ -290,9 +303,12 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
-    // --diff-alignment implies --diff, as it has nothing to align otherwise.
-    if cli.diff || cli.diff_alignment.is_some() {
+    // Several options imply --diff, having nothing else to mean.
+    if cli.diff || cli.diff_alignment.is_some() || cli.git_diff_rel || cli.git_diff_all {
         return run_diff(&cli, db);
+    }
+    if cli.count_and_diff {
+        return run_count_and_diff(&cli, db);
     }
 
     let started = Instant::now();
@@ -430,6 +446,48 @@ fn now_timestamp() -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
 }
 
+/// Resolve an input that may name a git revision instead of a path.
+///
+/// The export is returned alongside so the caller can keep it alive; a
+/// dropped export takes its temporary directory with it.
+fn resolve_input(input: &Path, force_git: bool) -> Result<(PathBuf, Option<git::Export>)> {
+    let spec = input.to_string_lossy();
+    if !force_git && !git::is_revision(&spec) {
+        return Ok((input.to_path_buf(), None));
+    }
+    if !git::is_revision(&spec) {
+        bail!("--git: {spec:?} is neither a path nor a git revision");
+    }
+    let export = git::export(&spec)?;
+    Ok((export.path().to_path_buf(), Some(export)))
+}
+
+/// `--count-and-diff`: count each input, then compare them.
+fn run_count_and_diff(cli: &Cli, db: &LangDb) -> Result<()> {
+    if cli.inputs.len() != 2 {
+        bail!(
+            "--count-and-diff takes exactly two inputs, got {}",
+            cli.inputs.len()
+        );
+    }
+    for input in &cli.inputs {
+        let single = Cli {
+            inputs: vec![input.clone()],
+            count_and_diff: false,
+            ..cli.clone()
+        };
+        let started = Instant::now();
+        let mut report = count(&single, db)?;
+        report.elapsed_secs = started.elapsed().as_secs_f64();
+        print!(
+            "{}",
+            output::render(&report, format_of(cli), &output_options(cli)?)
+        );
+        println!();
+    }
+    run_diff(cli, db)
+}
+
 /// `--diff`: compare exactly two inputs.
 fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
     if cli.inputs.len() != 2 {
@@ -438,7 +496,13 @@ fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
             cli.inputs.len()
         );
     }
-    let (left, right) = (&cli.inputs[0], &cli.inputs[1]);
+
+    // Inputs may be git revisions; each is exported to a temporary
+    // directory whose lifetime is tied to the guard held here.
+    let force_git = cli.git || cli.git_diff_rel || cli.git_diff_all;
+    let (left, _left_guard) = resolve_input(&cli.inputs[0], force_git)?;
+    let (right, _right_guard) = resolve_input(&cli.inputs[1], force_git)?;
+    let (left, right) = (&left, &right);
 
     let walk_opts = WalkOptions {
         exclude_dirs: split_list(&cli.exclude_dir),
@@ -465,8 +529,21 @@ fn run_diff(cli: &Cli, db: &LangDb) -> Result<()> {
             dedupe::remove_duplicates(found, db, &classify_opts).unique
         })
     };
-    let left_files = dedupe_side(left)?;
-    let right_files = dedupe_side(right)?;
+    let mut left_files = dedupe_side(left)?;
+    let mut right_files = dedupe_side(right)?;
+
+    // Diffing two revisions compares only the files that changed between
+    // them, since the rest cannot contribute; --git-diff-all asks for the
+    // whole tree instead. `--git --diff` already means the narrowed form,
+    // which is what --git-diff-rel is a name for.
+    if force_git && !cli.git_diff_all {
+        let changed = git::changed_files(
+            &cli.inputs[0].to_string_lossy(),
+            &cli.inputs[1].to_string_lossy(),
+        )?;
+        left_files = git::restrict_to(left_files, left, &changed);
+        right_files = git::restrict_to(right_files, right, &changed);
+    }
 
     let opts = DiffOptions {
         count: count_options(cli)?,
